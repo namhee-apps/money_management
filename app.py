@@ -891,37 +891,35 @@ if page == "포트폴리오 현황":
     _div_count     = _div_summary.get("count") or 0
     _confirmed_total_krw = realized_total_krw + _div_total_krw
 
-    # ── 상단 요약 카드 (JPY 기준) ─────────────────────────────
-    col1, col2, col3, col4, col5 = st.columns(5)
-    with col1:
-        st.metric(
-            "총 투자금 (JPY)",
-            format_jpy(summary["total_purchase_krw"], jpy_rate),
-            help="매수 당시 환율 기준 원화 환산 투자금 → 현재 JPY/KRW 기준으로 엔화 표시",
-        )
-    with col2:
-        st.metric("현재 평가액 (JPY)", format_jpy(summary["total_current_krw"], jpy_rate))
-    with col3:
+    # ── 상단 요약 카드 (JPY 기준, 모바일 2열 대응) ──────────────
+    def _short_jpy(krw_val):
+        """엔화 짧게: 10만 이상 → 만 단위"""
+        _j = (krw_val / jpy_rate) if jpy_rate > 0 else krw_val
+        if abs(_j) >= 10000:
+            return f"¥{_j/10000:.1f}만"
+        return f"¥{_j:,.0f}"
+
+    _r1c1, _r1c2, _r1c3 = st.columns(3)
+    with _r1c1:
+        st.metric("투자금", _short_jpy(summary["total_purchase_krw"]))
+    with _r1c2:
+        st.metric("평가액", _short_jpy(summary["total_current_krw"]))
+    with _r1c3:
         gain_sign = "+" if gain_krw >= 0 else ""
-        st.metric(
-            "미실현 손익 (JPY)",
-            format_jpy(gain_krw, jpy_rate),
-            f"{gain_sign}{gain_pct:.2f}%",
-            help="현재 보유 종목의 평가 손익 (아직 매도하지 않은 분)",
-        )
-    with col4:
+        st.metric("미실현 손익", _short_jpy(gain_krw), f"{gain_sign}{gain_pct:.1f}%")
+
+    _r2c1, _r2c2, _r2c3 = st.columns(3)
+    with _r2c1:
         _confirmed_jpy = (_confirmed_total_krw / jpy_rate) if jpy_rate > 0 else _confirmed_total_krw
         _conf_detail = f"{realized_count}건 매도"
         if _div_count:
-            _conf_detail += f" + {_div_count}건 배당"
-        st.metric(
-            "확정 수익 (JPY)",
-            f"¥{_confirmed_jpy:+,.0f}",
-            _conf_detail,
-            help="매도 손익 + 배당금 합계",
-        )
-    with col5:
-        st.metric("보유 종목 수", f"{len(aggregated)}종목")
+            _conf_detail += f"+{_div_count}배당"
+        st.metric("확정 수익", _short_jpy(_confirmed_total_krw), _conf_detail)
+    with _r2c2:
+        st.metric("종목 수", f"{len(aggregated)}개")
+    with _r2c3:
+        _total_net_jpy_short = _short_jpy(gain_krw + _confirmed_total_krw)
+        st.metric("순손익 합계", _total_net_jpy_short)
 
     # ── 전체 순손익 (미실현 + 확정) ───────────────────────────
     total_net_krw = gain_krw + _confirmed_total_krw
@@ -1185,19 +1183,24 @@ if page == "포트폴리오 현황":
         _vh_change = _vh_values[-1] - _vh_values[0]
         _vh_change_pct = (_vh_change / _vh_values[0] * 100) if _vh_values[0] else 0
         _vh_jpy = jpy_rate if jpy_rate > 0 else 1
-        _mc1, _mc2, _mc3, _mc4 = st.columns(4)
+
+        def _fmt_jpy(v):
+            """엔화 짧게 표시: 100만 이상 → 만 단위"""
+            _j = v / _vh_jpy
+            if abs(_j) >= 10000:
+                return f"¥{_j/10000:.1f}만"
+            return f"¥{_j:,.0f}"
+
+        _mc1, _mc2 = st.columns(2)
         with _mc1:
-            st.metric("현재 평가금", f"¥{_vh_values[-1] / _vh_jpy:,.0f}")
-            st.caption(f"₩{_vh_values[-1]:,.0f}")
+            st.metric("현재 평가금", _fmt_jpy(_vh_values[-1]))
         with _mc2:
-            st.metric("기간 변동", f"¥{_vh_change / _vh_jpy:+,.0f}", f"{_vh_change_pct:+.2f}%")
-            st.caption(f"₩{_vh_change:+,.0f}")
+            st.metric("기간 변동", _fmt_jpy(_vh_change), f"{_vh_change_pct:+.1f}%")
+        _mc3, _mc4 = st.columns(2)
         with _mc3:
-            st.metric("기간 최고", f"¥{max(_vh_values) / _vh_jpy:,.0f}")
-            st.caption(f"₩{max(_vh_values):,.0f}")
+            st.metric("기간 최고", _fmt_jpy(max(_vh_values)))
         with _mc4:
-            st.metric("기간 최저", f"¥{min(_vh_values) / _vh_jpy:,.0f}")
-            st.caption(f"₩{min(_vh_values):,.0f}")
+            st.metric("기간 최저", _fmt_jpy(min(_vh_values)))
 
         _vh_color = "#2196F3" if _vh_values[-1] >= _vh_values[0] else "#f44336"
         _fig_vh = go.Figure()
@@ -1229,12 +1232,14 @@ if page == "포트폴리오 현황":
                 hovertemplate="<b>%{x}</b><br>평가: ₩%{y:,.0f}<extra></extra>",
             ))
         _fig_vh.update_layout(
-            height=400,
-            margin=dict(t=10, b=40, l=60, r=20),
-            yaxis_title="금액 (KRW)",
+            height=350,
+            margin=dict(t=10, b=30, l=40, r=10),
+            yaxis_title="",
             yaxis_tickformat=",",
+            yaxis_tickfont=dict(size=10),
+            xaxis_tickfont=dict(size=10),
             xaxis_title="",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10)),
             hovermode="x unified",
         )
         st.plotly_chart(_fig_vh, use_container_width=True)
@@ -1271,26 +1276,40 @@ if page == "포트폴리오 현황":
             b = int(200 - 140 * intensity)
             _pie_colors.append(f"rgb({r},{g},{b})")
 
+    # 종목명 짧게 줄이기 (모바일 대응)
+    _pie_short_labels = []
+    for _pl in _pie_labels:
+        if len(_pl) > 12:
+            _pie_short_labels.append(_pl[:10] + "..")
+        else:
+            _pie_short_labels.append(_pl)
+
     _n_items = len(_pie_labels)
-    _pie_height = max(500, 450 + _n_items * 15)
-    _pie_margin = max(100, 60 + _n_items * 8)
     fig = go.Figure(data=[go.Pie(
-        labels=_pie_labels,
+        labels=_pie_short_labels,
         values=_pie_values,
-        hole=0.4,
+        hole=0.35,
         textinfo="label+percent",
-        textposition="outside",
+        textposition="inside",
+        insidetextorientation="horizontal",
         pull=[0.02] * len(_pie_labels),
         marker=dict(colors=_pie_colors),
-        sort=False,  # 이미 정렬했으므로 Plotly 자동 정렬 OFF
+        sort=False,
         direction="clockwise",
         hovertemplate="<b>%{label}</b><br>비중: %{percent}<extra></extra>",
-        automargin=True,
     )])
     fig.update_layout(
-        margin=dict(t=_pie_margin, b=_pie_margin, l=_pie_margin, r=_pie_margin),
-        height=_pie_height,
-        showlegend=False,
+        margin=dict(t=20, b=20, l=20, r=20),
+        height=max(400, 350 + _n_items * 8),
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.05,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
     )
     st.plotly_chart(fig, use_container_width=True)
 
