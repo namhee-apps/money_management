@@ -5748,14 +5748,14 @@ elif page == "설정":
         _gs_id_input = st.text_input(
             "스프레드시트 ID",
             value=_gs_id,
-            placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms",
+            type="password",
             help="Google Sheets URL의 /d/ 와 /edit 사이 긴 문자열",
         )
         _gs_creds_input = st.text_input(
-            "서비스 계정 JSON 파일 경로",
+            "서비스 계정 JSON 파일 경로 (Cloud에서는 비워두세요)",
             value=_gs_creds,
-            placeholder="/Users/.../stock_app/google_credentials.json",
-            help="Google Cloud에서 발급한 서비스 계정 JSON 키 파일의 전체 경로",
+            type="password",
+            help="로컬에서만 사용. Cloud는 Secrets의 GOOGLE_OAUTH_TOKEN 사용",
         )
         if st.form_submit_button("설정 저장"):
             _save_env_value("GOOGLE_SHEETS_ID", _gs_id_input.strip())
