@@ -49,12 +49,69 @@ def is_available() -> bool:
     return _GSPREAD_OK
 
 
-def _get_client(creds_path: str):
-    """OAuth2 방식으로 구글 계정 인증 (최초 1회 브라우저 로그인)"""
-    return gspread.oauth(
-        credentials_filename=creds_path,
-        authorized_user_filename=_TOKEN_PATH,
-    )
+def _get_client(creds_path: str = ""):
+    """
+    인증 방식 자동 선택:
+    1. Streamlit Secrets에 GOOGLE_OAUTH_TOKEN이 있으면 → OAuth refresh token 방식 (Cloud)
+    2. Streamlit Secrets에 GOOGLE_CREDENTIALS_JSON이 있으면 → 서비스 계정 방식 (Cloud)
+    3. 로컬 파일이 있으면 → OAuth2 방식 (Mac)
+    """
+    # 방식 1: Streamlit Secrets - OAuth refresh token (Cloud 환경)
+    try:
+        import streamlit as _st_gs
+        import json as _json_gs
+        from google.oauth2.credentials import Credentials as _OAuthCredentials
+
+        _oauth_json = _st_gs.secrets.get("GOOGLE_OAUTH_TOKEN", "")
+        if _oauth_json:
+            if isinstance(_oauth_json, str):
+                _info = _json_gs.loads(_oauth_json)
+            else:
+                _info = dict(_oauth_json)
+            _creds = _OAuthCredentials(
+                token=None,
+                refresh_token=_info["refresh_token"],
+                token_uri=_info.get("token_uri", "https://oauth2.googleapis.com/token"),
+                client_id=_info["client_id"],
+                client_secret=_info["client_secret"],
+                scopes=_info.get("scopes", [
+                    "https://www.googleapis.com/auth/spreadsheets",
+                    "https://www.googleapis.com/auth/drive",
+                ]),
+            )
+            return gspread.authorize(_creds)
+    except Exception:
+        pass
+
+    # 방식 2: Streamlit Secrets - 서비스 계정 (Cloud 환경)
+    try:
+        import streamlit as _st_gs2
+        import json as _json_gs2
+        from google.oauth2.service_account import Credentials as _SACredentials
+
+        _gs_json = _st_gs2.secrets.get("GOOGLE_CREDENTIALS_JSON", "")
+        if _gs_json:
+            if isinstance(_gs_json, str):
+                _info = _json_gs2.loads(_gs_json)
+            else:
+                _info = dict(_gs_json)
+            _scopes = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ]
+            _creds = _SACredentials.from_service_account_info(_info, scopes=_scopes)
+            return gspread.authorize(_creds)
+    except Exception:
+        pass
+
+    # 방식 3: 로컬 OAuth2 (Mac 환경)
+    if creds_path:
+        return gspread.oauth(
+            credentials_filename=creds_path,
+            authorized_user_filename=_TOKEN_PATH,
+        )
+
+    raise RuntimeError("Google 인증 정보를 찾을 수 없습니다.")
 
 
 def _ensure_worksheet(ss, name: str, rows: int = 2000, cols: int = 30):
