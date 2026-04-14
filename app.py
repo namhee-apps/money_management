@@ -5751,8 +5751,8 @@ elif page == "설정":
             "터미널에서 아래 명령어를 실행하세요:\n\n"
             "```\npip install gspread google-auth\n```"
         )
-    elif not _gs_id or not _gs_creds:
-        st.info("위에서 스프레드시트 ID와 서비스 계정 JSON 경로를 저장하면 동기화 버튼이 활성화됩니다.")
+    elif not _gs_id:
+        st.info("위에서 스프레드시트 ID를 저장하면 동기화 버튼이 활성화됩니다.")
     else:
         # Sheets 링크 표시
         _gs_url = get_spreadsheet_url(_gs_id)
