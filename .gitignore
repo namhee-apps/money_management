@@ -1,0 +1,31 @@
+# 비밀 정보 — 절대 GitHub에 올리지 않음
+.env
+google_credentials.json
+*.json
+!package.json
+
+# 데이터베이스
+data/portfolio.db
+
+# Streamlit 로컬 설정
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# 로그
+data/scheduler.log
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
