@@ -49,23 +49,50 @@ def is_available() -> bool:
     return _GSPREAD_OK
 
 
+def _resolve_oauth_json():
+    """GOOGLE_OAUTH_TOKEN 값을 st.secrets → os.environ 순서로 조회"""
+    import os as _os
+    try:
+        import streamlit as _st
+        _val = _st.secrets.get("GOOGLE_OAUTH_TOKEN", "")
+        if _val:
+            return _val
+    except Exception:
+        pass
+    return _os.environ.get("GOOGLE_OAUTH_TOKEN", "")
+
+
+def _resolve_service_account_json():
+    """GOOGLE_CREDENTIALS_JSON 값을 st.secrets → os.environ 순서로 조회"""
+    import os as _os
+    try:
+        import streamlit as _st
+        _val = _st.secrets.get("GOOGLE_CREDENTIALS_JSON", "")
+        if _val:
+            return _val
+    except Exception:
+        pass
+    return _os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+
+
 def _get_client(creds_path: str = ""):
     """
     인증 방식 자동 선택:
-    1. Streamlit Secrets에 GOOGLE_OAUTH_TOKEN이 있으면 → OAuth refresh token 방식 (Cloud)
-    2. Streamlit Secrets에 GOOGLE_CREDENTIALS_JSON이 있으면 → 서비스 계정 방식 (Cloud)
-    3. 로컬 파일이 있으면 → OAuth2 방식 (Mac)
+    1. GOOGLE_OAUTH_TOKEN (Streamlit Secrets 또는 env) → OAuth refresh token 방식
+       - Streamlit Cloud: st.secrets
+       - GitHub Actions CI: os.environ
+    2. GOOGLE_CREDENTIALS_JSON (st.secrets 또는 env) → 서비스 계정 방식
+    3. 로컬 creds 파일 → OAuth2 브라우저 방식 (Mac)
     """
-    # 방식 1: Streamlit Secrets - OAuth refresh token (Cloud 환경)
-    try:
-        import streamlit as _st_gs
-        import json as _json_gs
-        from google.oauth2.credentials import Credentials as _OAuthCredentials
+    import json as _json
 
-        _oauth_json = _st_gs.secrets.get("GOOGLE_OAUTH_TOKEN", "")
-        if _oauth_json:
+    # 방식 1: OAuth refresh token (Cloud / CI 공통)
+    _oauth_json = _resolve_oauth_json()
+    if _oauth_json:
+        try:
+            from google.oauth2.credentials import Credentials as _OAuthCredentials
             if isinstance(_oauth_json, str):
-                _info = _json_gs.loads(_oauth_json)
+                _info = _json.loads(_oauth_json)
             else:
                 _info = dict(_oauth_json)
             _creds = _OAuthCredentials(
@@ -80,19 +107,16 @@ def _get_client(creds_path: str = ""):
                 ]),
             )
             return gspread.authorize(_creds)
-    except Exception:
-        pass
+        except Exception:
+            pass
 
-    # 방식 2: Streamlit Secrets - 서비스 계정 (Cloud 환경)
-    try:
-        import streamlit as _st_gs2
-        import json as _json_gs2
-        from google.oauth2.service_account import Credentials as _SACredentials
-
-        _gs_json = _st_gs2.secrets.get("GOOGLE_CREDENTIALS_JSON", "")
-        if _gs_json:
+    # 방식 2: 서비스 계정 (Cloud / CI 공통)
+    _gs_json = _resolve_service_account_json()
+    if _gs_json:
+        try:
+            from google.oauth2.service_account import Credentials as _SACredentials
             if isinstance(_gs_json, str):
-                _info = _json_gs2.loads(_gs_json)
+                _info = _json.loads(_gs_json)
             else:
                 _info = dict(_gs_json)
             _scopes = [
@@ -101,8 +125,8 @@ def _get_client(creds_path: str = ""):
             ]
             _creds = _SACredentials.from_service_account_info(_info, scopes=_scopes)
             return gspread.authorize(_creds)
-    except Exception:
-        pass
+        except Exception:
+            pass
 
     # 방식 3: 로컬 OAuth2 (Mac 환경)
     if creds_path:
