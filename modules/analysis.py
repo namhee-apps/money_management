@@ -702,6 +702,96 @@ def pick_top_news(portfolio_items: list[dict], watchlist: list[str] | None = Non
         return "\n".join(lines)
 
 
+def pick_upside_picks(portfolio_items: list[dict], n: int = 3) -> str:
+    """
+    최근 뉴스 기반으로 상승 가능성이 있는 종목 n개를 Claude가 추천.
+    사용자가 이미 보유한 종목은 제외.
+    종목명/티커 + 추천 근거 뉴스 한 줄 요약 + 리스크 한 줄 반환.
+    Claude 키가 없으면 빈 문자열 반환(섹션 생략).
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return ""
+
+    # 현재 보유 중인 티커 (중복 추천 방지)
+    owned_tickers = set()
+    owned_list = []
+    sorted_items = sorted(portfolio_items or [],
+                          key=lambda x: x.get("current_value_krw", 0),
+                          reverse=True)
+    for it in sorted_items:
+        t = (it.get("ticker") or "").upper()
+        if t:
+            owned_tickers.add(t)
+        name = it.get("name", it.get("ticker", ""))
+        if name and len(owned_list) < 15:
+            owned_list.append(f"{name} ({it.get('ticker','')})")
+
+    # 시장 뉴스 + 보유 상위 종목 뉴스 수집 (섹터 동향 힌트)
+    news_lines = []
+    try:
+        market_news = get_market_news(max_per_source=4) or []
+    except Exception:
+        market_news = []
+    for mn in market_news[:20]:
+        title = (mn.get("title") or "").strip()
+        summary = (mn.get("summary") or "")[:180]
+        source = mn.get("source", "")
+        if title:
+            news_lines.append(f"[{source}] {title}\n  {summary}")
+
+    # 보유 상위 10개 종목의 뉴스 (섹터 인사이트)
+    seen_titles = set()
+    for item in sorted_items[:10]:
+        try:
+            for nw in get_stock_news(item.get("ticker", ""), max_items=2) or []:
+                title = (nw.get("title") or "").strip()
+                if title and title not in seen_titles:
+                    seen_titles.add(title)
+                    news_lines.append(f"[{item.get('name','')} 관련] {title}\n  {(nw.get('summary') or '')[:180]}")
+        except Exception:
+            continue
+
+    if not news_lines:
+        return ""
+
+    news_blob = "\n".join(news_lines[:35])
+
+    prompt = f"""아래 최신 뉴스를 분석해서, 단기~중기(1~3개월) 상승 가능성이 있어 보이는 종목 정확히 {n}개를
+추천해주세요. 사용자가 이미 보유한 종목은 **절대 제외**하고 새로운 종목만 제안하세요.
+
+사용자 현재 보유 (제외 대상): {', '.join(owned_list) if owned_list else '없음'}
+제외 티커 리스트: {', '.join(sorted(owned_tickers)) if owned_tickers else '없음'}
+
+뉴스:
+{news_blob}
+
+반드시 아래 형식으로만 답하세요 (다른 텍스트 금지):
+
+📈 상승 가능성 추천 TOP {n}
+
+1️⃣ 종목명 (TICKER)
+   💡 추천 근거: 한 줄로 핵심 이유 (관련 뉴스 근거)
+   ⚠️ 리스크: 한 줄로 주의점
+
+2️⃣ ...
+3️⃣ ...
+
+⚠️ 참고용이며 투자 판단은 본인 책임
+"""
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=900,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return message.content[0].text.strip()
+    except Exception:
+        return ""
+
+
 def run_daily_analysis(stocks: list[dict], portfolio_items: list[dict]) -> str:
     """
     일일 분석 실행 + DB 저장.
@@ -734,11 +824,16 @@ def run_daily_analysis(stocks: list[dict], portfolio_items: list[dict]) -> str:
         watchlist = []
 
     news_block = pick_top_news(portfolio_items, watchlist=watchlist, n=3)
+    picks_block = pick_upside_picks(portfolio_items, n=3)
+
+    combined = news_block
+    if picks_block:
+        combined = news_block + "\n\n─────────────────\n" + picks_block
 
     # DB에도 기록(레거시 호환)
     try:
-        save_report(date, news_block)
+        save_report(date, combined)
     except Exception:
         pass
 
-    return news_block
+    return combined
