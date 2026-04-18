@@ -25,15 +25,30 @@ try:
 except Exception:
     pass
 
+from modules import database as _db_module
 from modules.database import (
-    get_all_stocks, add_stock, update_stock, update_stock_name, update_stock_date,
-    update_stock_exchange_rate, update_stock_broker, update_stock_account_type, update_stock_ticker,
-    delete_stock, reduce_stock_quantity, get_reports, get_snapshots, get_snapshots_by_date, get_portfolio_value_history, save_snapshot, update_stock_group,
+    get_reports, get_snapshots, get_snapshots_by_date, get_portfolio_value_history, save_snapshot,
     add_recurring_investment, get_recurring_investments, update_recurring_last_added, toggle_recurring_investment, delete_recurring_investment,
-    add_sold_record, get_sold_history, get_sold_summary_by_ticker, delete_sold_record,
+    get_all_stocks, get_sold_history, get_sold_summary_by_ticker,
     add_dividend, get_dividends, get_dividend_summary, delete_dividend,
     save_settings_bulk, get_settings_bulk, save_setting, get_setting,
 )
+# DB 변경 함수들은 sheets_sync로 감싸서 호출 시 자동으로 "시트에 푸시할 게 있음" 플래그를 세팅
+from modules import sheets_sync as _sheets_sync
+_wrapped_mutations = _sheets_sync.wrap_mutations(_db_module)
+add_stock                    = _wrapped_mutations["add_stock"]
+update_stock                 = _wrapped_mutations["update_stock"]
+delete_stock                 = _wrapped_mutations["delete_stock"]
+update_stock_name            = _wrapped_mutations["update_stock_name"]
+update_stock_date            = _wrapped_mutations["update_stock_date"]
+update_stock_exchange_rate   = _wrapped_mutations["update_stock_exchange_rate"]
+update_stock_broker          = _wrapped_mutations["update_stock_broker"]
+update_stock_account_type    = _wrapped_mutations["update_stock_account_type"]
+update_stock_ticker          = _wrapped_mutations["update_stock_ticker"]
+update_stock_group           = _wrapped_mutations["update_stock_group"]
+reduce_stock_quantity        = _wrapped_mutations["reduce_stock_quantity"]
+add_sold_record              = _wrapped_mutations["add_sold_record"]
+delete_sold_record           = _wrapped_mutations["delete_sold_record"]
 from modules.stock_data import (
     get_stock_info, get_portfolio_summary, get_exchange_rate,
     get_exchange_rate_history, get_historical_exchange_rate,
@@ -46,7 +61,7 @@ import json as _json
 from modules.notifications import (
     send_telegram_message, detect_chat_id,
     format_daily_message, send_daily_notification, fetch_watchlist_news,
-    _load_env, _save_env_value,
+    _load_env, _save_env_value, is_cloud_env,
 )
 
 # ── 페이지 설정 ────────────────────────────────────────────────
@@ -87,6 +102,20 @@ def _check_password():
 if not _check_password():
     st.stop()
 
+# ── Google Sheets 자동 동기화 ─────────────────────────────────
+# (1) 세션 최초 진입 시: 로컬 DB가 비어있고 시트에 데이터가 있으면 시트 → DB 로드
+#     Cloud 환경에서 컨테이너 재시작으로 DB가 날아가도 자동으로 복구됨.
+# (2) 이전 rerun에서 DB 변경이 있었다면(_sheet_dirty) 시트로 업로드.
+try:
+    _auto = _sheets_sync.auto_load_if_empty()
+    if _auto.get("loaded"):
+        st.toast(f"📥 Google Sheets에서 자동 복원: {_auto.get('message','')}", icon="☁️")
+    _push = _sheets_sync.push_if_dirty()
+    if _push.get("pushed"):
+        st.toast("☁️ Google Sheets에 자동 백업 완료", icon="✅")
+except Exception:
+    pass
+
 # ── 공통 스타일 ────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -117,7 +146,7 @@ def color_pct(v: float) -> str:
 st.sidebar.title("📊 주식 포트폴리오")
 page = st.sidebar.radio(
     "메뉴",
-    ["포트폴리오 현황", "종목 추가/관리", "투자 추천", "경제적 자유 계획", "환율 분석", "일일 리포트", "설정"],
+    ["포트폴리오 현황", "종목 추가/관리", "투자 추천", "경제적 자유 계획", "환율 분석", "일일 리포트", "오프라인에서 보기", "설정"],
     format_func=lambda x: {
         "포트폴리오 현황": "📊 포트폴리오 현황",
         "종목 추가/관리": "➕ 종목 추가/관리",
@@ -125,6 +154,7 @@ page = st.sidebar.radio(
         "경제적 자유 계획": "🏖️ 경제적 자유 계획",
         "환율 분석": "💱 환율 분석",
         "일일 리포트": "📅 일일 리포트",
+        "오프라인에서 보기": "📱 오프라인에서 보기",
         "설정": "⚙️ 설정",
     }[x],
 )
@@ -216,11 +246,106 @@ def format_jpy(krw: float, jpy_rate: float) -> str:
     return f"¥{(krw / jpy_rate):,.0f}" if jpy_rate > 0 else f"¥{krw:,.0f}"
 
 
-def generate_offline_html_snapshot():
+def _fetch_close_series(ticker: str, days: int):
+    """주가 히스토리 (날짜, 종가) 반환."""
+    import yfinance as _yf
+    from datetime import timedelta as _td
+    try:
+        _end = datetime.now()
+        _start = _end - _td(days=days + 10)
+        _t = _yf.Ticker(ticker)
+        _hist = _t.history(
+            start=_start.strftime("%Y-%m-%d"),
+            end=_end.strftime("%Y-%m-%d"),
+        )
+        if _hist.empty:
+            return [], []
+        if _hist.index.tzinfo is not None:
+            _hist.index = _hist.index.tz_localize(None)
+        _hist = _hist.tail(days)
+        _d = [idx.strftime("%Y-%m-%d") for idx in _hist.index]
+        _c = [float(v) for v in _hist["Close"].tolist()]
+        return _d, _c
+    except Exception:
+        return [], []
+
+
+def _analyze_stock_movement(ticker: str, name: str, change_pct: float,
+                             days: int, news_items: list) -> str:
+    """AI 등락 원인 분석. API 키 없으면 빈 문자열 반환."""
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return ""
+    try:
+        import anthropic as _anth
+        _news_text = "\n".join(
+            f"- {n.get('title','')}: {n.get('summary','')[:250]}"
+            for n in (news_items or [])[:5] if n.get('title')
+        ) or "(관련 뉴스 없음)"
+        _dir = "상승" if change_pct >= 0 else "하락"
+        _prompt = (
+            f"종목: {name} ({ticker})\n"
+            f"최근 {days}일 변동률: {change_pct:+.2f}% ({_dir})\n\n"
+            f"관련 뉴스:\n{_news_text}\n\n"
+            f"이 종목이 왜 {_dir}했는지 한국어로 3~4문장, 핵심만 간결하게 설명해주세요. "
+            f"뉴스에서 단서가 보이면 해당 내용을 언급하고, "
+            f"단서가 부족하면 업종/시장 흐름으로 일반적 해석을 해주세요. "
+            f"말머리 기호 없이 자연스러운 문장으로."
+        )
+        _client = _anth.Anthropic(api_key=api_key)
+        _resp = _client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            messages=[{"role": "user", "content": _prompt}],
+        )
+        return _resp.content[0].text.strip()
+    except Exception as _e:
+        return f"분석 실패: {_e}"
+
+
+def _analyze_stock_forecast(ticker: str, name: str, change_pct: float,
+                             days: int, current_price: float,
+                             start_price: float, news_items: list) -> str:
+    """AI 향후 전망 분석. API 키 없으면 빈 문자열 반환."""
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return ""
+    try:
+        import anthropic as _anth
+        _news_text = "\n".join(
+            f"- {n.get('title','')}: {n.get('summary','')[:250]}"
+            for n in (news_items or [])[:5] if n.get('title')
+        ) or "(관련 뉴스 없음)"
+        _dir = "상승" if change_pct >= 0 else "하락"
+        _prompt = (
+            f"종목: {name} ({ticker})\n"
+            f"최근 {days}일 변동: {start_price:.2f} → {current_price:.2f} ({change_pct:+.2f}%, {_dir})\n\n"
+            f"관련 뉴스:\n{_news_text}\n\n"
+            f"이 종목의 향후 전망을 한국어로 분석해주세요. 다음 구조로 작성:\n\n"
+            f"**📅 단기 (1~4주)**: 가까운 시일 내 예상되는 방향과 주요 변수 1~2개\n"
+            f"**📆 중기 (1~3개월)**: 업종 흐름·실적 등을 고려한 방향\n"
+            f"**⚠️ 주요 리스크**: 하락 요인 1~2가지\n"
+            f"**💡 상승 모멘텀**: 상승 요인 1~2가지\n\n"
+            f"각 항목은 2문장 이내로 간결하게. 뉴스에 단서가 약하면 업종/시장 맥락으로 보강하세요. "
+            f"마지막에 '※ 투자 판단은 본인 책임입니다.' 한 줄 추가."
+        )
+        _client = _anth.Anthropic(api_key=api_key)
+        _resp = _client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=900,
+            messages=[{"role": "user", "content": _prompt}],
+        )
+        return _resp.content[0].text.strip()
+    except Exception as _e:
+        return f"전망 분석 실패: {_e}"
+
+
+def generate_offline_html_snapshot(include_ai: bool = False, progress_cb=None):
     """
     현재 포트폴리오 상태를 단일 HTML 파일로 내보내기.
     Plotly JS를 인라인으로 포함해 오프라인에서도 차트가 동작함.
     비행기 등 인터넷이 없을 때 핸드폰 브라우저로 확인하는 용도.
+    include_ai=True면 종목별 AI 등락 원인·향후 전망을 API로 생성해 내장.
     """
     stocks = get_all_stocks()
     if not stocks:
@@ -378,6 +503,118 @@ def generate_offline_html_snapshot():
         <div class="charts">{''.join(chart_htmls)}</div>
         """
 
+    # ── 종목별 단기 변동률 + AI 분석 ─────────────────────────
+    short_term_periods = [("1주", 7), ("2주", 14), ("1개월", 30), ("3개월", 90)]
+    trend_rows = []
+    trend_price_cache = {}  # ticker -> {days: (dates, closes)}
+    for item in items:
+        tk = item["ticker"]
+        trend_price_cache[tk] = {}
+        cells = [f"<td><b>{item['name']}</b><br><small>{tk}</small></td>"]
+        for _lbl, _d in short_term_periods:
+            _dates, _closes = _fetch_close_series(tk, _d)
+            trend_price_cache[tk][_d] = (_dates, _closes)
+            if _closes and len(_closes) >= 2 and _closes[0]:
+                _p = (_closes[-1] - _closes[0]) / _closes[0] * 100
+                _cls = "gain" if _p >= 0 else "loss"
+                cells.append(f'<td class="{_cls}">{_p:+.2f}%</td>')
+            else:
+                cells.append('<td class="muted">-</td>')
+        trend_rows.append(f"<tr>{''.join(cells)}</tr>")
+
+    shortterm_html = f"""
+    <h2>📊 종목별 단기 변동률</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>종목</th><th>1주</th><th>2주</th><th>1개월</th><th>3개월</th>
+        </tr></thead>
+        <tbody>{''.join(trend_rows)}</tbody>
+      </table>
+    </div>
+    """
+
+    # ── AI 분석 섹션 (옵션) ───────────────────────────────────
+    ai_section = ""
+    if include_ai:
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            ai_section = (
+                '<h2>🤖 AI 분석</h2>'
+                '<p class="muted">API 키가 설정되지 않아 AI 분석을 생성할 수 없었습니다. '
+                '설정 페이지에서 Anthropic API 키를 입력하세요.</p>'
+            )
+        else:
+            ai_cards = []
+            _total = len(items)
+            for _i, item in enumerate(items, 1):
+                tk = item["ticker"]
+                nm = item["name"]
+                if progress_cb:
+                    progress_cb(_i, _total, nm)
+                _dates_w, _closes_w = trend_price_cache.get(tk, {}).get(7, ([], []))
+                if not _closes_w or len(_closes_w) < 2 or not _closes_w[0]:
+                    continue
+                _chg_pct = (_closes_w[-1] - _closes_w[0]) / _closes_w[0] * 100
+                try:
+                    _news = get_stock_news(tk, max_items=5)
+                except Exception:
+                    _news = []
+                _explain = _analyze_stock_movement(tk, nm, _chg_pct, 7, _news)
+                _forecast = _analyze_stock_forecast(tk, nm, _chg_pct, 7,
+                                                     _closes_w[-1], _closes_w[0], _news)
+
+                def _md_to_html(s: str) -> str:
+                    import re as _re
+                    if not s:
+                        return "(내용 없음)"
+                    s = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+                    s = s.replace("\n\n", "</p><p>").replace("\n", "<br>")
+                    return f"<p>{s}</p>"
+
+                _arrow = "📈" if _chg_pct >= 0 else "📉"
+                _cls = "gain" if _chg_pct >= 0 else "loss"
+                _news_items_html = ""
+                if _news:
+                    _news_items = []
+                    for _n in _news[:3]:
+                        _t = _n.get("title", "")
+                        _u = _n.get("url", "")
+                        if _t and _u:
+                            _news_items.append(f'<li><a href="{_u}" target="_blank">{_t}</a></li>')
+                        elif _t:
+                            _news_items.append(f"<li>{_t}</li>")
+                    if _news_items:
+                        _news_items_html = (
+                            '<div class="ai-news"><small>📰 참고 뉴스</small><ul>'
+                            + "".join(_news_items) + "</ul></div>"
+                        )
+
+                ai_cards.append(f"""
+                <div class="ai-card">
+                  <div class="ai-head">
+                    {_arrow} <b>{nm}</b> <small>({tk})</small>
+                    <span class="{_cls}">· 1주 {_chg_pct:+.2f}%</span>
+                  </div>
+                  <div class="ai-section">
+                    <div class="ai-title">📝 등락 원인</div>
+                    {_md_to_html(_explain)}
+                  </div>
+                  <div class="ai-section">
+                    <div class="ai-title">🔮 향후 전망</div>
+                    {_md_to_html(_forecast)}
+                  </div>
+                  {_news_items_html}
+                </div>
+                """)
+            if ai_cards:
+                ai_section = (
+                    '<h2>🤖 AI 분석 (1주 기준)</h2>'
+                    + '<div class="ai-grid">'
+                    + "".join(ai_cards)
+                    + '</div>'
+                )
+
     # ── 전체 HTML 조립 ──────────────────────────────────────
     html = f"""<!DOCTYPE html>
 <html lang="ko">
@@ -428,6 +665,23 @@ def generate_offline_html_snapshot():
       background: #fff; border: 1px solid #e5e5e5;
       border-radius: 10px; padding: 6px;
     }}
+    .muted {{ color: #888; }}
+    .ai-grid {{ display: grid; gap: 14px; margin-top: 12px; }}
+    .ai-card {{
+      background: #fff; border: 1px solid #e5e5e5;
+      border-radius: 10px; padding: 14px 16px;
+    }}
+    .ai-head {{
+      font-size: 1.0em; border-bottom: 1px solid #eee;
+      padding-bottom: 6px; margin-bottom: 10px;
+    }}
+    .ai-section {{ margin-top: 10px; }}
+    .ai-title {{ font-weight: 600; font-size: 0.92em; margin-bottom: 4px; color: #333; }}
+    .ai-section p {{ margin: 4px 0; font-size: 0.93em; line-height: 1.5; color: #222; }}
+    .ai-news {{ margin-top: 10px; border-top: 1px dashed #e5e5e5; padding-top: 8px; }}
+    .ai-news ul {{ margin: 4px 0 0 18px; padding: 0; }}
+    .ai-news li {{ font-size: 0.85em; margin: 2px 0; color: #555; }}
+    .ai-news a {{ color: #1565c0; text-decoration: none; }}
     .footer {{
       text-align: center; color: #888; margin-top: 40px;
       font-size: 0.85em; border-top: 1px solid #e5e5e5; padding-top: 20px;
@@ -446,6 +700,8 @@ def generate_offline_html_snapshot():
   <div class="timestamp">생성: {now_str} · 참고 환율: 1엔 = ₩{jpy_rate:,.2f}</div>
   {metrics_html}
   {holdings_html}
+  {shortterm_html}
+  {ai_section}
   {sold_html_block}
   {charts_section}
   <div class="footer">
@@ -1026,21 +1282,21 @@ if page == "포트폴리오 현황":
     # ── 자산 변동 추이 (보유 종목 주가 히스토리 기반) ─────────────
     st.subheader("📈 내 자산 변동 추이")
 
-    _period_opts = {"1개월": 30, "3개월": 90, "6개월": 180, "1년": 365, "3년": 1095, "5년": 1825}
+    _period_opts = {"1주": 7, "2주": 14, "1개월": 30, "3개월": 90, "6개월": 180, "1년": 365, "3년": 1095, "5년": 1825}
     _period_sel = st.pills("기간", list(_period_opts.keys()), default="3개월", key="val_hist_period")
     _period_days = _period_opts.get(_period_sel, 90)
 
     @st.cache_data(ttl=3600, show_spinner=False)
-    def _calc_portfolio_history(_stocks_json: str, _days: int) -> tuple:
+    def _calc_portfolio_history(stocks_json: str, days: int) -> tuple:
         """보유 종목의 주가+환율 히스토리로 포트폴리오 가치 추이 계산."""
         import yfinance as _yf_hist
         from datetime import timedelta as _td_hist
-        _stocks_list = _json.loads(_stocks_json)
+        _stocks_list = _json.loads(stocks_json)
         if not _stocks_list:
             return [], []
 
         _end_dt = datetime.now().strftime("%Y-%m-%d")
-        _start_dt = (datetime.now() - _td_hist(days=_days + 10)).strftime("%Y-%m-%d")
+        _start_dt = (datetime.now() - _td_hist(days=days + 10)).strftime("%Y-%m-%d")
 
         # 티커별 보유 정보 집계: {ticker: [(quantity, purchase_date, currency), ...]}
         _holdings = {}
@@ -1123,7 +1379,7 @@ if page == "포트폴리오 현황":
             _all_dates.update(prices.keys())
         if not _all_dates:
             return [], []
-        _all_dates = sorted(_all_dates)[-_days:]
+        _all_dates = sorted(_all_dates)[-days:]
 
         # 날짜별 포트폴리오 가치 계산
         _dates_out = []
@@ -1165,7 +1421,7 @@ if page == "포트폴리오 현황":
     )
 
     with st.spinner("자산 변동 추이 계산 중..."):
-        _vh_dates, _vh_values = _calc_portfolio_history(_stocks_for_hist, _period_days)
+        _vh_dates, _vh_values = _calc_portfolio_history(stocks_json=_stocks_for_hist, days=_period_days)
 
     if _vh_dates and len(_vh_dates) >= 2:
         # 투자금 라인 계산 (매수일 <= 날짜인 종목의 매수금액 합산)
@@ -3068,6 +3324,223 @@ elif page == "종목 추가/관리":
                             f"증권사: {broker or '미설정'} | 계좌: {account_type} | 적용 환율: {final_rate:,.2f}원"
                         )
                         st.rerun()
+
+    st.markdown("---")
+
+    # ── 종목별 주가 추이 + AI 분석 ───────────────────────────────
+    st.subheader("📊 종목별 주가 추이")
+    st.caption("기간별 각 종목의 움직임과 AI가 분석한 등락 이유·향후 전망을 확인합니다.")
+
+    _trend_stocks = get_all_stocks()
+    if not _trend_stocks:
+        st.info("추가된 종목이 없습니다. 아래에서 종목을 먼저 추가하세요.")
+    else:
+        _trend_aggregated = aggregate_stocks_by_ticker(_trend_stocks)
+
+        _st_period_opts = {"1주": 7, "2주": 14, "1개월": 30, "3개월": 90}
+        _st_period_sel = st.pills(
+            "기간", list(_st_period_opts.keys()),
+            default="1주", key="stock_trend_period",
+        )
+        _st_period_days = _st_period_opts.get(_st_period_sel, 7)
+
+        @st.cache_data(ttl=1800, show_spinner=False)
+        def _fetch_single_stock_history(ticker: str, days: int) -> tuple:
+            import yfinance as _yf_ps
+            from datetime import timedelta as _td_ps
+            try:
+                _end = datetime.now()
+                _start = _end - _td_ps(days=days + 10)
+                _t = _yf_ps.Ticker(ticker)
+                _hist = _t.history(
+                    start=_start.strftime("%Y-%m-%d"),
+                    end=_end.strftime("%Y-%m-%d"),
+                )
+                if _hist.empty:
+                    return [], []
+                if _hist.index.tzinfo is not None:
+                    _hist.index = _hist.index.tz_localize(None)
+                _hist = _hist.tail(days)
+                _d = [idx.strftime("%Y-%m-%d") for idx in _hist.index]
+                _c = [float(v) for v in _hist["Close"].tolist()]
+                return _d, _c
+            except Exception:
+                return [], []
+
+        @st.cache_data(ttl=3600, show_spinner=False)
+        def _explain_stock_movement(ticker: str, name: str, change_pct: float,
+                                     days: int, news_json: str) -> str:
+            api_key = os.getenv("ANTHROPIC_API_KEY", "")
+            if not api_key:
+                return "⚙️ 설정에서 Anthropic API 키를 입력하면 AI 분석을 받을 수 있습니다."
+            try:
+                import anthropic as _anth_sm
+                _news_list = _json.loads(news_json)
+                _news_text = "\n".join(
+                    f"- {n.get('title','')}: {n.get('summary','')[:250]}"
+                    for n in _news_list[:5] if n.get('title')
+                ) or "(관련 뉴스 없음)"
+                _dir = "상승" if change_pct >= 0 else "하락"
+                _prompt = (
+                    f"종목: {name} ({ticker})\n"
+                    f"최근 {days}일 변동률: {change_pct:+.2f}% ({_dir})\n\n"
+                    f"관련 뉴스:\n{_news_text}\n\n"
+                    f"이 종목이 왜 {_dir}했는지 한국어로 3~4문장, 핵심만 간결하게 설명해주세요. "
+                    f"뉴스에서 단서가 보이면 해당 내용을 언급하고, "
+                    f"단서가 부족하면 업종/시장 흐름으로 일반적 해석을 해주세요. "
+                    f"말머리 기호 없이 자연스러운 문장으로."
+                )
+                _client = _anth_sm.Anthropic(api_key=api_key)
+                _resp = _client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=500,
+                    messages=[{"role": "user", "content": _prompt}],
+                )
+                return _resp.content[0].text.strip()
+            except Exception as _e:
+                return f"분석 실패: {_e}"
+
+        @st.cache_data(ttl=3600, show_spinner=False)
+        def _forecast_stock_outlook(ticker: str, name: str, change_pct: float,
+                                     days: int, current_price: float,
+                                     start_price: float, news_json: str) -> str:
+            api_key = os.getenv("ANTHROPIC_API_KEY", "")
+            if not api_key:
+                return "⚙️ 설정에서 Anthropic API 키를 입력하면 AI 전망 분석을 받을 수 있습니다."
+            try:
+                import anthropic as _anth_fc
+                _news_list = _json.loads(news_json)
+                _news_text = "\n".join(
+                    f"- {n.get('title','')}: {n.get('summary','')[:250]}"
+                    for n in _news_list[:5] if n.get('title')
+                ) or "(관련 뉴스 없음)"
+                _dir = "상승" if change_pct >= 0 else "하락"
+                _prompt = (
+                    f"종목: {name} ({ticker})\n"
+                    f"최근 {days}일 변동: {start_price:.2f} → {current_price:.2f} ({change_pct:+.2f}%, {_dir})\n\n"
+                    f"관련 뉴스:\n{_news_text}\n\n"
+                    f"이 종목의 향후 전망을 한국어로 분석해주세요. 다음 구조로 작성:\n\n"
+                    f"**📅 단기 (1~4주)**: 가까운 시일 내 예상되는 방향과 주요 변수 1~2개\n"
+                    f"**📆 중기 (1~3개월)**: 업종 흐름·실적 등을 고려한 방향\n"
+                    f"**⚠️ 주요 리스크**: 하락 요인 1~2가지\n"
+                    f"**💡 상승 모멘텀**: 상승 요인 1~2가지\n\n"
+                    f"각 항목은 2문장 이내로 간결하게. 뉴스에 단서가 약하면 업종/시장 맥락으로 보강하세요. "
+                    f"마지막에 '※ 투자 판단은 본인 책임입니다.' 한 줄 추가."
+                )
+                _client = _anth_fc.Anthropic(api_key=api_key)
+                _resp = _client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=900,
+                    messages=[{"role": "user", "content": _prompt}],
+                )
+                return _resp.content[0].text.strip()
+            except Exception as _e:
+                return f"전망 분석 실패: {_e}"
+
+        for _agg in _trend_aggregated:
+            _t_ticker = _agg["ticker"]
+            _t_name = _agg["name"]
+            _dates_st, _closes_st = _fetch_single_stock_history(_t_ticker, _st_period_days)
+
+            if not _closes_st or len(_closes_st) < 2:
+                with st.expander(f"**{_t_name}** ({_t_ticker})", expanded=False):
+                    st.caption("주가 히스토리를 가져올 수 없습니다.")
+                continue
+
+            _chg = _closes_st[-1] - _closes_st[0]
+            _chg_pct = (_chg / _closes_st[0] * 100) if _closes_st[0] else 0
+            _arrow = "📈" if _chg_pct >= 0 else "📉"
+            _label = f"{_arrow} **{_t_name}** ({_t_ticker}) · {_chg_pct:+.2f}%"
+
+            with st.expander(_label, expanded=False):
+                _color = "#2196F3" if _chg_pct >= 0 else "#f44336"
+                _fill_c = "rgba(33,150,243,0.12)" if _chg_pct >= 0 else "rgba(244,67,54,0.12)"
+                _y_min = min(_closes_st)
+                _y_max = max(_closes_st)
+                _y_pad = (_y_max - _y_min) * 0.1 or _y_max * 0.01
+
+                _fig_s = go.Figure()
+                _fig_s.add_trace(go.Scatter(
+                    x=_dates_st, y=_closes_st,
+                    mode="lines",
+                    line=dict(color=_color, width=2),
+                    fill="tozeroy",
+                    fillcolor=_fill_c,
+                    hovertemplate="<b>%{x}</b><br>%{y:,.2f}<extra></extra>",
+                ))
+                _fig_s.update_layout(
+                    height=240,
+                    margin=dict(t=10, b=30, l=50, r=10),
+                    yaxis=dict(range=[_y_min - _y_pad, _y_max + _y_pad],
+                               tickformat=",", tickfont=dict(size=9)),
+                    xaxis_tickfont=dict(size=9),
+                    xaxis_title="", yaxis_title="",
+                    showlegend=False,
+                )
+                st.plotly_chart(_fig_s, use_container_width=True)
+
+                _native_cur = _get_stock_native_currency(_t_ticker)
+                _native_sym = {"USD": "$", "JPY": "¥", "KRW": "₩"}.get(_native_cur, "")
+                _mc_a, _mc_b, _mc_c = st.columns(3)
+                with _mc_a:
+                    st.metric(f"{_st_period_sel} 변동률",
+                              f"{_chg_pct:+.2f}%",
+                              f"{_native_sym}{_chg:+,.2f}")
+                with _mc_b:
+                    st.metric("시작가", f"{_native_sym}{_closes_st[0]:,.2f}")
+                with _mc_c:
+                    st.metric("현재가", f"{_native_sym}{_closes_st[-1]:,.2f}")
+
+                _ai_key = f"aitrend_{_t_ticker}_{_st_period_days}"
+                _fc_key = f"aifcst_{_t_ticker}_{_st_period_days}"
+                _btn_label = f"🤖 왜 {'올랐는지' if _chg_pct >= 0 else '내렸는지'} AI 분석"
+                _btn_col1, _btn_col2 = st.columns(2)
+                with _btn_col1:
+                    if st.button(_btn_label, key=f"btn_{_ai_key}", use_container_width=True):
+                        st.session_state[_ai_key] = True
+                with _btn_col2:
+                    if st.button("🔮 향후 전망 AI 분석", key=f"btn_{_fc_key}", use_container_width=True):
+                        st.session_state[_fc_key] = True
+
+                _news_cache_key = f"newscache_{_t_ticker}"
+                if st.session_state.get(_ai_key) or st.session_state.get(_fc_key):
+                    if _news_cache_key not in st.session_state:
+                        with st.spinner("뉴스 조회 중..."):
+                            st.session_state[_news_cache_key] = get_stock_news(_t_ticker, max_items=5)
+                    _n_list = st.session_state[_news_cache_key]
+                    _n_json_arg = _json.dumps(_n_list, ensure_ascii=False)
+                else:
+                    _n_list = []
+                    _n_json_arg = "[]"
+
+                if st.session_state.get(_ai_key):
+                    with st.spinner("AI 등락 원인 분석 중..."):
+                        _explanation = _explain_stock_movement(
+                            _t_ticker, _t_name, _chg_pct,
+                            _st_period_days, _n_json_arg,
+                        )
+                    st.markdown("**📝 등락 원인**")
+                    st.info(_explanation)
+
+                if st.session_state.get(_fc_key):
+                    with st.spinner("AI 향후 전망 분석 중..."):
+                        _forecast = _forecast_stock_outlook(
+                            _t_ticker, _t_name, _chg_pct,
+                            _st_period_days, _closes_st[-1], _closes_st[0],
+                            _n_json_arg,
+                        )
+                    st.markdown("**🔮 향후 전망**")
+                    st.success(_forecast)
+
+                if (st.session_state.get(_ai_key) or st.session_state.get(_fc_key)) and _n_list:
+                    st.caption("📰 참고한 뉴스")
+                    for _i_n, _it_n in enumerate(_n_list[:3], 1):
+                        _tt = _it_n.get("title", "")
+                        _tu = _it_n.get("url", "")
+                        if _tt and _tu:
+                            st.markdown(f"{_i_n}. [{_tt}]({_tu})")
+                        elif _tt:
+                            st.markdown(f"{_i_n}. {_tt}")
 
     st.markdown("---")
 
@@ -5425,12 +5898,173 @@ elif page == "일일 리포트":
 
 
 # ══════════════════════════════════════════════════════════════
+# 페이지: 오프라인에서 보기
+# ══════════════════════════════════════════════════════════════
+elif page == "오프라인에서 보기":
+    st.title("📱 오프라인에서 보기")
+    st.caption(
+        "한 번 바로가기를 만들어두면 집 Wi-Fi 안에서 **핸드폰 홈 화면 아이콘 → 탭 한 번**으로 "
+        "최신 포트폴리오 요약·차트·AI 분석을 볼 수 있습니다. "
+        "완전 오프라인(비행기 모드)은 HTML 파일로 다운로드하세요."
+    )
+
+    if "offline_snapshot_html" not in st.session_state:
+        st.session_state.offline_snapshot_html = None
+
+    _snap_include_ai = st.checkbox(
+        "🤖 AI 분석 포함 (등락 원인 + 향후 전망)",
+        value=False,
+        key="snap_include_ai",
+        help="체크 시 종목마다 Anthropic API 호출 (Haiku+Sonnet). 생성 시간·비용 증가.",
+    )
+
+    _auto_refresh = st.checkbox(
+        "⏱️ 이 페이지 열 때마다 자동 갱신 (15분 TTL 캐시)",
+        value=False, key="snap_auto_refresh",
+        help="페이지 방문 시 스냅샷을 자동으로 새로 만들어 바로가기를 최신으로 유지합니다.",
+    )
+
+    def _save_snapshot_to_static(include_ai_flag: bool, progress_cb=None) -> int:
+        _html = generate_offline_html_snapshot(
+            include_ai=include_ai_flag, progress_cb=progress_cb,
+        )
+        if not _html:
+            return 0
+        _static_path = Path(__file__).parent / "static" / "mobile.html"
+        _static_path.parent.mkdir(parents=True, exist_ok=True)
+        _static_path.write_text(_html, encoding="utf-8")
+        st.session_state.offline_snapshot_html = _html
+        return len(_html)
+
+    @st.cache_data(ttl=900, show_spinner=False)
+    def _auto_refresh_tick(include_ai_flag: bool) -> int:
+        return _save_snapshot_to_static(include_ai_flag)
+
+    if _auto_refresh:
+        with st.spinner("자동 갱신 중..."):
+            _auto_refresh_tick(_snap_include_ai)
+
+    def _get_lan_ip() -> str:
+        import socket
+        try:
+            _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            _s.connect(("8.8.8.8", 80))
+            _ip = _s.getsockname()[0]
+            _s.close()
+            return _ip
+        except Exception:
+            return "localhost"
+
+    def _build_mobile_url() -> str:
+        _port = os.environ.get("STREAMLIT_SERVER_PORT", "8501")
+        return f"http://{_get_lan_ip()}:{_port}/app/static/mobile.html"
+
+    def _qr_png_bytes(text: str) -> bytes:
+        import qrcode
+        import io
+        _q = qrcode.QRCode(box_size=8, border=2)
+        _q.add_data(text)
+        _q.make(fit=True)
+        _img = _q.make_image(fill_color="black", back_color="white")
+        _buf = io.BytesIO()
+        _img.save(_buf, format="PNG")
+        return _buf.getvalue()
+
+    _col_sg, _col_sd = st.columns([1, 1])
+    with _col_sg:
+        if st.button("🔗 모바일 바로가기 만들기 / 업데이트",
+                     type="primary", use_container_width=True):
+            _progress_bar = st.progress(0.0, text="스냅샷 준비 중...")
+
+            def _pcb(i, total, name):
+                _progress_bar.progress(
+                    min(i / max(total, 1), 1.0),
+                    text=f"AI 분석 {i}/{total}: {name}",
+                )
+
+            with st.spinner("스냅샷 생성 중 (주가·차트 로딩)..."):
+                _size = _save_snapshot_to_static(
+                    _snap_include_ai,
+                    _pcb if _snap_include_ai else None,
+                )
+            _progress_bar.empty()
+            if _size > 0:
+                st.success(f"✅ 모바일 바로가기 준비 완료! ({_size//1024:,}KB)")
+            else:
+                st.warning("⚠️ 포트폴리오가 비어 있습니다. 먼저 종목을 추가하세요.")
+
+    with _col_sd:
+        if st.session_state.offline_snapshot_html:
+            st.download_button(
+                "⬇️ 오프라인용 HTML 다운로드",
+                data=st.session_state.offline_snapshot_html,
+                file_name=f"portfolio_snapshot_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+                mime="text/html",
+                use_container_width=True,
+                help="비행기 모드 등 완전 오프라인에서 볼 때 사용 (핸드폰에 전송 필요)",
+            )
+        else:
+            st.button("⬇️ 오프라인용 HTML 다운로드", disabled=True, use_container_width=True,
+                      help="먼저 왼쪽 버튼으로 스냅샷을 만드세요.")
+
+    _static_file = Path(__file__).parent / "static" / "mobile.html"
+    if _static_file.exists():
+        _mobile_url = _build_mobile_url()
+        st.markdown("#### 📲 핸드폰으로 열기")
+        _qc_l, _qc_r = st.columns([1, 2])
+        with _qc_l:
+            try:
+                st.image(_qr_png_bytes(_mobile_url), caption="QR 코드로 스캔", width=200)
+            except Exception as _e:
+                st.caption(f"QR 생성 실패: {_e}")
+        with _qc_r:
+            st.code(_mobile_url, language=None)
+            _mtime = datetime.fromtimestamp(_static_file.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            st.caption(f"⏱️ 마지막 갱신: {_mtime} · 크기: {_static_file.stat().st_size//1024:,}KB")
+            st.markdown(
+                "**사용법:**\n"
+                "1. 핸드폰 카메라로 QR 스캔 → Safari/Chrome 열림\n"
+                "2. 📤 공유 → **홈 화면에 추가** (iPhone) / ⋮ → **홈 화면에 추가** (Android)\n"
+                "3. 이후엔 홈 아이콘 **탭 한 번**으로 최신 정보 확인\n"
+                "4. 데이터를 최신화하려면 위 `🔗 만들기/업데이트` 재클릭 또는 자동 갱신 체크"
+            )
+            st.caption(
+                "⚠️ 핸드폰과 PC가 **같은 Wi-Fi**여야 합니다. 외부에서 보려면 오프라인 HTML 다운로드 이용."
+            )
+    else:
+        st.info("아직 바로가기가 생성되지 않았습니다. 위의 `🔗 모바일 바로가기 만들기` 버튼을 누르세요.")
+
+    st.markdown("---")
+    st.markdown(
+        "#### 📖 비행기 모드 (완전 오프라인) 사용법\n"
+        "1. **[비행 전]** `⬇️ 오프라인용 HTML 다운로드` 클릭\n"
+        "2. **[핸드폰 전송]** 다운로드한 파일을 핸드폰으로:\n"
+        "   - iPhone: AirDrop / 이메일 / Google Drive / 카카오톡 '나에게 보내기'\n"
+        "   - Android: Google Drive / 이메일 / Telegram '나에게 보내기' / USB\n"
+        "3. **[핸드폰에서 열기]** 전송된 파일을 탭 → 브라우저가 자동으로 열림\n"
+        "4. **[앱 아이콘처럼]** (선택) 브라우저에서 📤 → `홈 화면에 추가`\n"
+        "5. **[비행기 안]** 홈 아이콘 탭 → 완전 오프라인에서도 전체 포트폴리오·차트 확인\n\n"
+        "⚠️ 생성 당시의 정적 스냅샷 — 가격은 갱신 시점으로 고정됩니다."
+    )
+
+
+# ══════════════════════════════════════════════════════════════
 # 페이지 5: 설정
 # ══════════════════════════════════════════════════════════════
 elif page == "설정":
     st.title("⚙️ 설정")
 
     env = _load_env()
+
+    # Cloud 환경 안내 — 여기서 저장한 값이 재시작 시 사라지는 이유 명확히 표시
+    if is_cloud_env():
+        st.info(
+            "☁️ **Streamlit Cloud 환경입니다.**\n\n"
+            "아래 값들은 **세션 동안만** 유효하고 앱이 재시작되면 사라집니다. "
+            "영구 보존하려면 **Streamlit Cloud → Settings → Secrets**에 직접 입력하세요. "
+            "(핸드폰에서도 같은 Secrets 값을 쓰니 한번만 넣으면 웹·모바일 공통으로 유지됩니다.)\n\n"
+            "필요한 키 목록은 리포지토리의 `secrets.toml.example` 파일을 참고하세요."
+        )
 
     # ── API 키 설정 ────────────────────────────────────────────
     st.subheader("API 키 설정")
@@ -5459,61 +6093,6 @@ elif page == "설정":
             _save_env_value("NOTIFICATION_TIME", notif_time)
             _save_env_value("DAILY_REPORT_TIME", report_time)
             st.success("✅ 설정이 저장되었습니다.")
-
-    st.markdown("---")
-
-    # ══════════════════════════════════════════════════════════
-    # 오프라인 스냅샷 (비행기 모드용)
-    # ══════════════════════════════════════════════════════════
-    st.subheader("📱 오프라인 스냅샷 (비행기 모드용)")
-    st.caption(
-        "현재 포트폴리오 상태를 **단일 HTML 파일**로 저장합니다. "
-        "비행기·지하 등 인터넷이 없을 때 핸드폰 브라우저로 열면 "
-        "요약 카드·종목 테이블·주가 차트가 그대로 보입니다.  \n"
-        "사용법: 아래 버튼으로 다운로드 → 핸드폰에 AirDrop/이메일/Drive로 전송 → 브라우저로 열기"
-    )
-
-    if "offline_snapshot_html" not in st.session_state:
-        st.session_state.offline_snapshot_html = None
-
-    _col_sg, _col_sd = st.columns([1, 1])
-    with _col_sg:
-        if st.button("🔄 스냅샷 새로 생성", type="primary", use_container_width=True):
-            with st.spinner("스냅샷 생성 중 (주가·차트 로딩)..."):
-                _snap_html = generate_offline_html_snapshot()
-            if _snap_html:
-                st.session_state.offline_snapshot_html = _snap_html
-                st.success(f"✅ 스냅샷 생성 완료! ({len(_snap_html)//1024:,}KB)")
-            else:
-                st.warning("⚠️ 포트폴리오가 비어 있습니다. 먼저 종목을 추가하세요.")
-    with _col_sd:
-        if st.session_state.offline_snapshot_html:
-            st.download_button(
-                "⬇️ HTML 파일 다운로드",
-                data=st.session_state.offline_snapshot_html,
-                file_name=f"portfolio_snapshot_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
-                mime="text/html",
-                type="primary",
-                use_container_width=True,
-            )
-        else:
-            st.button("⬇️ HTML 파일 다운로드", disabled=True, use_container_width=True,
-                      help="먼저 '스냅샷 새로 생성' 버튼을 누르세요.")
-
-    st.markdown(
-        "#### 📖 사용 순서 (비행기 모드용)\n"
-        "1. **[비행 전]** 위의 `🔄 스냅샷 새로 생성` → `⬇️ HTML 파일 다운로드` 클릭\n"
-        "2. **[핸드폰 전송]** 다운로드한 `portfolio_snapshot_YYYYMMDD_HHMM.html`을 핸드폰으로:\n"
-        "   - iPhone: AirDrop / 이메일 / Google Drive / 카카오톡 '나에게 보내기'\n"
-        "   - Android: Google Drive / 이메일 / Telegram '나에게 보내기' / USB\n"
-        "3. **[핸드폰에서 열기]** 전송된 파일을 탭 → 브라우저(Safari/Chrome)가 자동으로 열림\n"
-        "4. **[앱 아이콘처럼 쓰기]** (선택) 브라우저에서:\n"
-        "   - **iPhone Safari**: 하단 공유 버튼 📤 → `홈 화면에 추가` → 아이콘 생김\n"
-        "   - **Android Chrome**: 우측 상단 ⋮ 메뉴 → `홈 화면에 추가`\n"
-        "5. **[비행기 안]** 홈 화면 아이콘 탭 → 오프라인에서 전체 포트폴리오·차트 확인 가능\n\n"
-        "⚠️ **정적 스냅샷**입니다 — 생성 당시의 가격이 고정됩니다. 최신 가격으로 보려면 비행 전에 반드시 다시 생성하세요.  \n"
-        "📈 차트는 JavaScript가 파일에 내장되어 있어 **오프라인에서도 호버·줌이 작동**합니다."
-    )
 
     st.markdown("---")
 

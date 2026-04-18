@@ -1,7 +1,13 @@
 """
 scheduler.py - 매일 자동으로 뉴스 + 포트폴리오 리포트를 텔레그램으로 전송
-실행: python scheduler.py
-(백그라운드 유지 실행 → Ctrl+C로 종료)
+
+실행 모드:
+  python scheduler.py                       # 로컬 상시 실행 (BlockingScheduler, Ctrl+C로 종료)
+  python scheduler.py --now                 # 시작 직후 일일 리포트 1회 즉시 실행 + 상시 유지
+  python scheduler.py --job report          # 일일 리포트 1회만 실행 후 종료 (GitHub Actions용)
+  python scheduler.py --job news            # 뉴스만 1회 실행 후 종료 (GitHub Actions용)
+
+CI(GitHub Actions)에서 실행 시 로컬 DB가 비어있으므로 시작 시 Google Sheets에서 포트폴리오를 자동 로드.
 """
 
 import os
@@ -10,15 +16,13 @@ import logging
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
-from apscheduler.schedulers.blocking import BlockingScheduler
-from apscheduler.triggers.cron import CronTrigger
 
 # 프로젝트 루트 경로 설정
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
-from modules.database import get_all_stocks, get_setting
+from modules.database import get_all_stocks, get_sold_history, get_setting
 from modules.stock_data import get_portfolio_summary
 from modules.analysis import run_daily_analysis
 from modules.notifications import send_daily_notification, send_telegram_message, fetch_watchlist_news
@@ -32,6 +36,39 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+
+def bootstrap_from_sheets_if_empty():
+    """
+    CI에서 DB가 비어있으면 Google Sheets → DB 로드 (Streamlit 없이 직접 호출).
+    modules.sheets_sync는 streamlit session_state에 의존하므로 여기서는 gsheets를 직접 사용.
+    """
+    sheet_id = os.getenv("GOOGLE_SHEETS_ID", "").strip()
+    if not sheet_id:
+        logger.info("GOOGLE_SHEETS_ID 미설정 — 시트 부트스트랩 건너뜀")
+        return
+    if get_all_stocks() or get_sold_history():
+        logger.info("로컬 DB에 데이터 있음 — 시트 부트스트랩 건너뜀")
+        return
+    try:
+        from modules.gsheets import sync_from_sheets, apply_import
+        creds_path = os.getenv("GOOGLE_SHEETS_CREDENTIALS", "").strip()
+        result = sync_from_sheets(sheet_id, creds_path)
+        if not result.get("success"):
+            logger.warning(f"시트 로드 실패: {result.get('message')}")
+            return
+        portfolio = result.get("portfolio") or []
+        sold = result.get("sold") or []
+        if not portfolio and not sold:
+            logger.info("시트에 데이터 없음")
+            return
+        apply = apply_import(portfolio, sold)
+        if apply.get("success"):
+            logger.info(f"시트에서 DB 복원: {apply.get('message')}")
+        else:
+            logger.warning(f"DB 적용 실패: {apply.get('message')}")
+    except Exception as e:
+        logger.exception(f"시트 부트스트랩 오류: {e}")
 
 
 def news_job():
@@ -101,12 +138,40 @@ def parse_times(time_str: str) -> list[tuple[int, int]]:
     return times if times else [(8, 20)]
 
 
+def _parse_arg_value(argv: list[str], flag: str) -> str | None:
+    """'--job report' 또는 '--job=report' 둘 다 지원"""
+    for i, a in enumerate(argv):
+        if a == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith(f"{flag}="):
+            return a.split("=", 1)[1]
+    return None
+
+
 if __name__ == "__main__":
-    # 뉴스 시간
+    # ── 원샷 모드 (GitHub Actions용): --job report | news ──
+    job_arg = _parse_arg_value(sys.argv, "--job")
+    if job_arg:
+        bootstrap_from_sheets_if_empty()
+        if job_arg == "report":
+            logger.info("원샷 모드: 일일 리포트 실행")
+            daily_report_job()
+        elif job_arg == "news":
+            logger.info("원샷 모드: 뉴스 실행")
+            news_job()
+        else:
+            logger.error(f"알 수 없는 --job 값: {job_arg} (report | news 중 하나)")
+            sys.exit(1)
+        logger.info("원샷 모드 완료")
+        sys.exit(0)
+
+    # ── 상시 실행 모드 (로컬 Mac) ──
+    from apscheduler.schedulers.blocking import BlockingScheduler
+    from apscheduler.triggers.cron import CronTrigger
+
     news_time_str = os.getenv("NOTIFICATION_TIME", "08:20, 12:20, 21:00")
     news_times = parse_times(news_time_str)
 
-    # 리포트 시간
     report_time_str = os.getenv("DAILY_REPORT_TIME", "19:00")
     rpt_h, rpt_m = parse_times(report_time_str)[0]
 

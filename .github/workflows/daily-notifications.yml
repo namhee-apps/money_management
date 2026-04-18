@@ -1,0 +1,80 @@
+name: Daily Telegram Notifications
+
+# Streamlit Cloud는 idle 시 앱을 재우기 때문에 내부 스케줄러가 실제로 정각에 동작하지 않습니다.
+# 이 워크플로우는 GitHub Actions cron을 사용해 외부에서 scheduler.py를 원샷 모드로 호출합니다.
+# 시간은 모두 UTC (KST = UTC+9)
+#
+# 필요한 GitHub Secrets (Repository → Settings → Secrets and variables → Actions):
+#   ANTHROPIC_API_KEY         — Claude API 키
+#   TELEGRAM_BOT_TOKEN        — 텔레그램 봇 토큰
+#   TELEGRAM_CHAT_ID          — 텔레그램 chat id
+#   GOOGLE_SHEETS_ID          — 구글 시트 ID
+#   GOOGLE_OAUTH_TOKEN        — OAuth refresh token JSON (google_token.json 내용 한 줄 문자열)
+
+on:
+  schedule:
+    # 뉴스: 08:20 KST = 23:20 UTC (전날)
+    - cron: "20 23 * * *"
+    # 뉴스: 12:20 KST = 03:20 UTC
+    - cron: "20 3 * * *"
+    # 일일 리포트: 19:00 KST = 10:00 UTC
+    - cron: "0 10 * * *"
+    # 뉴스: 21:00 KST = 12:00 UTC
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "실행할 job (report | news)"
+        required: true
+        default: "report"
+        type: choice
+        options:
+          - report
+          - news
+
+concurrency:
+  group: daily-notifications
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
+      TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+      GOOGLE_SHEETS_ID:    ${{ secrets.GOOGLE_SHEETS_ID }}
+      GOOGLE_OAUTH_TOKEN:  ${{ secrets.GOOGLE_OAUTH_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Decide job type
+        id: pick
+        run: |
+          # 수동 실행이면 입력값 사용, 스케줄이면 cron 표현식으로 판별
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "job=${{ github.event.inputs.job }}" >> "$GITHUB_OUTPUT"
+          else
+            case "${{ github.event.schedule }}" in
+              "0 10 * * *") echo "job=report" >> "$GITHUB_OUTPUT" ;;
+              *)            echo "job=news"   >> "$GITHUB_OUTPUT" ;;
+            esac
+          fi
+
+      - name: Run scheduler (${{ steps.pick.outputs.job }})
+        run: python scheduler.py --job ${{ steps.pick.outputs.job }}

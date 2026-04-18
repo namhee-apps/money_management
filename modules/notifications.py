@@ -12,37 +12,77 @@ from datetime import datetime
 
 ENV_PATH = Path(__file__).parent.parent / ".env"
 
+# Streamlit Cloud에서 Secrets → os.environ 으로 주입되는 설정 키 목록
+_ENV_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "NOTIFICATION_TIME",
+    "DAILY_REPORT_TIME",
+    "GOOGLE_SHEETS_ID",
+    "GOOGLE_SHEETS_CREDENTIALS",
+    "GOOGLE_OAUTH_TOKEN",
+    "APP_PASSWORD",
+)
+
 
 def _load_env():
-    """현재 .env 파일을 직접 읽어 토큰 반환"""
-    if not ENV_PATH.exists():
-        return {}
+    """
+    설정값 로드. 우선순위:
+      1. .env 파일 (로컬 Mac 사용자 최신 저장값)
+      2. os.environ (Streamlit Cloud → Secrets 자동 주입)
+    Cloud에서는 .env 파일이 없어도 Secrets 값을 바로 읽어옵니다.
+    """
     data = {}
-    for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, _, v = line.partition("=")
-            data[k.strip()] = v.strip()
+    if ENV_PATH.exists():
+        for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                data[k.strip()] = v.strip()
+    for key in _ENV_KEYS:
+        if not data.get(key):
+            val = os.environ.get(key, "")
+            if val:
+                data[key] = val
     return data
 
 
+def is_cloud_env() -> bool:
+    """Streamlit Cloud 환경인지 판별 (Secrets에는 값이 있지만 로컬 .env가 없는 상태)"""
+    try:
+        import streamlit as _st
+        if _st.secrets and len(_st.secrets) > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _save_env_value(key: str, value: str):
-    """.env 파일의 특정 키 값 업데이트"""
+    """
+    .env 파일의 특정 키 값 업데이트.
+    Cloud 환경에서는 파일 저장이 컨테이너 재시작 시 소실되므로, 세션 동안에만 유효.
+    영구 보존이 필요하면 Streamlit Cloud → Settings → Secrets에서 수정해야 함.
+    """
+    # Cloud에서도 일단 저장은 시도 (세션 내에서는 유효). 재시작 시 사라짐.
     if not ENV_PATH.exists():
         ENV_PATH.write_text(f"{key}={value}\n", encoding="utf-8")
-        return
-    lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
-    updated = False
-    new_lines = []
-    for line in lines:
-        if line.strip().startswith(f"{key}="):
+    else:
+        lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
+        updated = False
+        new_lines = []
+        for line in lines:
+            if line.strip().startswith(f"{key}="):
+                new_lines.append(f"{key}={value}")
+                updated = True
+            else:
+                new_lines.append(line)
+        if not updated:
             new_lines.append(f"{key}={value}")
-            updated = True
-        else:
-            new_lines.append(line)
-    if not updated:
-        new_lines.append(f"{key}={value}")
-    ENV_PATH.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        ENV_PATH.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    # 같은 세션 내에서 즉시 반영되도록 os.environ도 업데이트
+    os.environ[key] = value
 
 
 # ── 텔레그램 봇 ──────────────────────────────────────────────
