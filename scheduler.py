@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
 from modules.database import get_all_stocks, get_sold_history, get_setting
-from modules.stock_data import get_portfolio_summary
+from modules.stock_data import get_portfolio_summary, aggregate_stocks_by_ticker
 from modules.analysis import run_daily_analysis
 from modules.notifications import send_daily_notification, send_telegram_message, fetch_watchlist_news
 
@@ -101,11 +101,13 @@ def daily_report_job():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     logger.info(f"=== 일일 리포트: {now} ===")
     try:
-        stocks = get_all_stocks()
-        if not stocks:
+        raw_stocks = get_all_stocks()
+        if not raw_stocks:
             logger.warning("보유 종목이 없어 건너뜁니다.")
         else:
-            logger.info(f"종목 {len(stocks)}개 데이터 수집 중...")
+            # 같은 티커 여러 매수 건은 합쳐서 1개로 (TOP 5가 전부 같은 종목이 되는 문제 방지)
+            stocks = aggregate_stocks_by_ticker(raw_stocks)
+            logger.info(f"종목 {len(raw_stocks)}건 → {len(stocks)}개 티커로 집계, 데이터 수집 중...")
             summary = get_portfolio_summary(stocks)
             logger.info("AI 분석 리포트 생성 중...")
             report = run_daily_analysis(stocks, summary["items"])

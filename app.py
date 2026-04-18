@@ -6178,11 +6178,12 @@ elif page == "설정":
     # ── 수동 일일 알림 ─────────────────────────────────────────
     st.subheader("수동 일일 리포트 전송")
     if st.button("지금 일일 리포트 전송"):
-        stocks = get_all_stocks()
-        if not stocks:
+        raw = get_all_stocks()
+        if not raw:
             st.warning("보유 종목을 먼저 추가하세요.")
         else:
             with st.spinner("포트폴리오 분석 및 전송 중..."):
+                stocks = aggregate_stocks_by_ticker(raw)
                 summary = get_portfolio_summary(stocks)
                 report = run_daily_analysis(stocks, summary["items"])
                 result = send_daily_notification(summary, report)
@@ -6245,8 +6246,9 @@ elif page == "설정":
             def _daily_report_job():
                 """일일 리포트 + 뉴스 전송 (19:00에만)"""
                 try:
-                    _stocks = get_all_stocks()
-                    if _stocks:
+                    _raw = get_all_stocks()
+                    if _raw:
+                        _stocks = aggregate_stocks_by_ticker(_raw)
                         _summary = get_portfolio_summary(_stocks)
                         _report = run_daily_analysis(_stocks, _summary["items"])
                         send_daily_notification(_summary, _report)
