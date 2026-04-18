@@ -164,15 +164,22 @@ def detect_chat_id(bot_token: str) -> str | None:
 
 # ── 메시지 포맷 ───────────────────────────────────────────────
 
-def format_daily_message(summary: dict, report_text: str, date: str | None = None) -> str:
-    """일일 알림용 메시지 포맷 구성"""
+def format_daily_message(summary: dict, report_text: str, date: str | None = None,
+                         top_n: int = 5) -> str:
+    """
+    일일 알림 메시지 포맷:
+      1) 헤더 (날짜, 총 평가액, 총 손익)
+      2) 🔥 오늘 변동 TOP N (절대 변동폭 큰 순)
+      3) 📋 그 외 종목 요약 (건수, 평균 일일 변동률, 평가액 합)
+      4) report_text (AI가 고른 주요 뉴스 TOP 3 블록)
+    """
     if date is None:
         date = datetime.now().strftime("%Y-%m-%d")
 
     total_current = summary.get("total_current_krw", 0)
     total_gain = summary.get("total_gain_krw", 0)
     total_gain_pct = summary.get("total_gain_pct", 0)
-    items = summary.get("items", [])
+    items = summary.get("items", []) or []
 
     arrow = "▲" if total_gain >= 0 else "▼"
     emoji = "📈" if total_gain >= 0 else "📉"
@@ -182,43 +189,65 @@ def format_daily_message(summary: dict, report_text: str, date: str | None = Non
     lines = [
         f"🕐 {date} {now_time} (KST)",
         "",
-        f"📊 [일일 포트폴리오 리포트]",
+        "📊 일일 포트폴리오 리포트",
         "",
         f"💼 총 평가액: ₩{total_current:,.0f}",
         f"{emoji} 총 손익: {arrow}₩{abs(total_gain):,.0f} ({total_gain_pct:+.2f}%)",
-        "",
-        "─────────────────",
-        "📌 종목별 현황:",
     ]
 
-    symbol_map = {"USD": "$", "JPY": "¥", "KRW": "₩"}
-    for item in items:
-        sym = symbol_map.get(item.get("currency", "USD"), "$")
-        name = item.get("name", item["ticker"])
-        ticker = item["ticker"]
-        qty = item.get("quantity", 0)
-        curr_price = item.get("current_price", 0)
-        daily_pct = item.get("daily_change_pct", 0)
-        total_pct = item.get("total_gain_pct", 0)
-        curr_val = item.get("current_value_krw", 0)
-        fx_pct = item.get("fx_gain_pct", 0)
-        currency = item.get("currency", "USD")
+    if not items:
+        lines += ["", "보유 종목이 없습니다."]
+        if report_text:
+            lines += ["", "─────────────────", report_text]
+        return "\n".join(lines)
 
-        d_arrow = "▲" if daily_pct >= 0 else "▼"
-        lines.append(
-            f"• {name} ({ticker}) {qty:.0f}주\n"
-            f"  현재가: {sym}{curr_price:,.2f} ({d_arrow}{abs(daily_pct):.2f}%)\n"
-            f"  평가액: ₩{curr_val:,.0f} | 총수익: {total_pct:+.2f}%"
-        )
-        if currency != "KRW":
-            lines.append(f"  환율영향: {fx_pct:+.2f}%")
+    symbol_map = {"USD": "$", "JPY": "¥", "KRW": "₩"}
+
+    # 오늘 변동폭(절댓값) 큰 순으로 정렬 → TOP N
+    sorted_items = sorted(items, key=lambda x: abs(x.get("daily_change_pct", 0) or 0),
+                          reverse=True)
+    top_items = sorted_items[:top_n]
+    rest_items = sorted_items[top_n:]
 
     lines += [
         "",
         "─────────────────",
-        "📰 변동 이유 분석:",
-        report_text,
+        f"🔥 오늘 변동 TOP {len(top_items)}",
     ]
+
+    for item in top_items:
+        sym = symbol_map.get(item.get("currency", "USD"), "$")
+        name = item.get("name", item["ticker"])
+        ticker = item["ticker"]
+        curr_price = item.get("current_price", 0)
+        daily_pct = item.get("daily_change_pct", 0) or 0
+        curr_val = item.get("current_value_krw", 0)
+
+        d_arrow = "▲" if daily_pct >= 0 else "▼"
+        lines.append(
+            f"• {name} ({ticker})\n"
+            f"  {sym}{curr_price:,.2f}  {d_arrow}{abs(daily_pct):.2f}%  ₩{curr_val:,.0f}"
+        )
+
+    # 나머지 종목 요약
+    if rest_items:
+        rest_cnt = len(rest_items)
+        rest_value = sum(i.get("current_value_krw", 0) or 0 for i in rest_items)
+        rest_avg = sum(i.get("daily_change_pct", 0) or 0 for i in rest_items) / rest_cnt
+        rest_arrow = "▲" if rest_avg >= 0 else "▼"
+        lines += [
+            "",
+            "📋 그 외 종목",
+            f"  {rest_cnt}개 · 평균 {rest_arrow}{abs(rest_avg):.2f}% · ₩{rest_value:,.0f}",
+        ]
+
+    # 뉴스 블록 (run_daily_analysis에서 전달받은 값 그대로)
+    if report_text:
+        lines += [
+            "",
+            "─────────────────",
+            report_text,
+        ]
 
     return "\n".join(lines)
 

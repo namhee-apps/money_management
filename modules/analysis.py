@@ -582,15 +582,138 @@ def translate_news_batch(news_items: list) -> list:
         return news_items
 
 
+def pick_top_news(portfolio_items: list[dict], watchlist: list[str] | None = None,
+                  n: int = 3, top_holdings: int = 10) -> str:
+    """
+    보유 종목(상위 N개) + 관심 키워드 뉴스를 모아 Claude가 포트폴리오 영향도 순으로
+    상위 n개를 선별해 한국어로 요약한 뉴스 블록을 반환.
+    Claude 키가 없거나 실패하면 raw 뉴스 원제목 3개를 fallback으로 반환.
+    """
+    if watchlist is None:
+        watchlist = []
+
+    # 1) 보유 비중 상위 종목의 뉴스 수집
+    sorted_items = sorted(portfolio_items or [],
+                          key=lambda x: x.get("current_value_krw", 0),
+                          reverse=True)[:top_holdings]
+
+    raw_news = []
+    seen_titles = set()
+    for item in sorted_items:
+        ticker = item.get("ticker", "")
+        name = item.get("name", ticker)
+        try:
+            news_list = get_stock_news(ticker, max_items=3)
+        except Exception:
+            news_list = []
+        for news in news_list:
+            title = (news.get("title") or "").strip()
+            if not title or title in seen_titles:
+                continue
+            seen_titles.add(title)
+            raw_news.append({
+                "source": f"{name} ({ticker})",
+                "title": title,
+                "summary": (news.get("summary") or "")[:200],
+            })
+
+    # 2) 관심 키워드 뉴스 수집 (yfinance)
+    if watchlist:
+        try:
+            import yfinance as yf
+            for kw in watchlist:
+                kw = kw.strip()
+                if not kw:
+                    continue
+                try:
+                    t = yf.Ticker(kw)
+                    news_list = t.news or []
+                except Exception:
+                    news_list = []
+                for item in news_list[:3]:
+                    content = item.get("content", {}) or {}
+                    title = (content.get("title") or "").strip()
+                    if not title or title in seen_titles:
+                        continue
+                    seen_titles.add(title)
+                    raw_news.append({
+                        "source": f"관심: {kw}",
+                        "title": title,
+                        "summary": (content.get("summary") or "")[:200],
+                    })
+        except ImportError:
+            pass
+
+    if not raw_news:
+        return "📰 주요 뉴스\n  (오늘 수집된 뉴스가 없습니다)"
+
+    # 3) Claude에게 TOP n 선별 + 한국어 요약 요청
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        lines = ["📰 주요 뉴스"]
+        for i, n_item in enumerate(raw_news[:n], 1):
+            lines.append(f"{i}. [{n_item['source']}] {n_item['title']}")
+        return "\n".join(lines)
+
+    news_blob = "\n".join(
+        f"[{n_item['source']}] {n_item['title']}\n  {n_item['summary']}"
+        for n_item in raw_news[:30]  # Claude에 너무 많이 보내지 않도록 상한
+    )
+
+    holdings_summary = ", ".join(
+        f"{it.get('name', it.get('ticker',''))} ({it.get('ticker','')})"
+        for it in sorted_items[:8]
+    )
+
+    prompt = f"""아래 후보 뉴스 중에서 이 포트폴리오에 **영향이 가장 큰 순서로 정확히 {n}개**만 뽑아서
+한국어로 간결하게 요약해주세요. 이모지·숫자 이모지 적극 활용.
+
+보유 비중 상위: {holdings_summary}
+
+뉴스 후보:
+{news_blob}
+
+반드시 아래 형식으로만 답하세요 (다른 텍스트 금지):
+
+📰 주요 뉴스 TOP {n}
+
+1️⃣ [출처/종목]
+   핵심 한 줄 제목
+   → 왜 중요한지 한 줄 설명
+
+2️⃣ ...
+3️⃣ ...
+"""
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=800,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return message.content[0].text.strip()
+    except Exception as e:
+        # Fallback
+        lines = [f"📰 주요 뉴스 TOP {n}"]
+        for i, n_item in enumerate(raw_news[:n], 1):
+            lines.append(f"{i}. [{n_item['source']}] {n_item['title']}")
+        lines.append(f"\n(AI 선별 오류: {e})")
+        return "\n".join(lines)
+
+
 def run_daily_analysis(stocks: list[dict], portfolio_items: list[dict]) -> str:
     """
     일일 분석 실행 + DB 저장.
     stocks: portfolio 테이블 원본 리스트
     portfolio_items: calculate_profit_loss가 적용된 리스트
+
+    반환값: TOP3 주요 뉴스 블록 (텔레그램 메시지 하단에 삽입됨).
+    종목별 상세 분석은 메시지 본문에서 TOP 5 mover로 대체되었으므로 여기서는 뉴스만 담당.
     """
     date = datetime.now().strftime("%Y-%m-%d")
 
-    # 스냅샷 저장
+    # 스냅샷 저장 (기존 동작 유지)
     for item in portfolio_items:
         save_snapshot(
             date=date,
@@ -601,8 +724,21 @@ def run_daily_analysis(stocks: list[dict], portfolio_items: list[dict]) -> str:
             daily_change_pct=item["daily_change_pct"],
         )
 
-    # 리포트 생성 및 저장
-    report_text = generate_daily_report(portfolio_items, date)
-    save_report(date, report_text)
+    # 관심 키워드 가져오기
+    try:
+        from .database import get_setting
+        nw_str = get_setting("news_watchlist", "") or ""
+        inv_str = get_setting("invest_watchlist_keywords", "") or ""
+        watchlist = [k.strip() for k in (nw_str + "," + inv_str).split(",") if k.strip()]
+    except Exception:
+        watchlist = []
 
-    return report_text
+    news_block = pick_top_news(portfolio_items, watchlist=watchlist, n=3)
+
+    # DB에도 기록(레거시 호환)
+    try:
+        save_report(date, news_block)
+    except Exception:
+        pass
+
+    return news_block
