@@ -72,35 +72,102 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── 비밀번호 인증 ────────────────────────────────────────────
-def _check_password():
-    """비밀번호 인증. Streamlit Cloud에서는 secrets.toml, 로컬에서는 .env 사용."""
-    # 비밀번호 설정이 없으면 인증 건너뛰기 (로컬 개발용)
-    _pw = ""
+# ── 로그인 인증 (streamlit-authenticator: 아이디 + 해시된 비밀번호 + 서명 쿠키) ──
+def _auth_conf(key: str, default: str = "") -> str:
+    """AUTH_* 설정값을 st.secrets → os.environ 순으로 조회"""
     try:
-        _pw = st.secrets.get("APP_PASSWORD", "")
+        v = st.secrets.get(key, "")
+        if v:
+            return str(v)
     except Exception:
         pass
-    if not _pw:
-        _pw = os.getenv("APP_PASSWORD", "")
-    if not _pw:
-        return True  # 비밀번호 미설정 시 인증 없이 통과
+    return os.environ.get(key, default)
 
-    if st.session_state.get("authenticated"):
-        return True
 
-    st.title("🔒 로그인")
-    _input_pw = st.text_input("비밀번호를 입력하세요", type="password", key="login_pw")
-    if st.button("로그인", type="primary"):
-        if _input_pw == _pw:
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("비밀번호가 틀렸습니다.")
-    return False
+def _run_auth():
+    """
+    로그인 필요 여부를 판단하고, 필요하면 로그인 폼을 표시.
+    반환값: (authenticator, authenticated_bool)
+    AUTH_USERNAME/AUTH_PASSWORD_HASH/AUTH_COOKIE_KEY 미설정 시 인증 생략(로컬 개발용).
+    """
+    username_val = _auth_conf("AUTH_USERNAME")
+    pw_hash      = _auth_conf("AUTH_PASSWORD_HASH")
+    cookie_key   = _auth_conf("AUTH_COOKIE_KEY")
 
-if not _check_password():
+    # 구 버전 APP_PASSWORD만 있고 새 AUTH_* 미설정 시 — 로그인 필요하다고 알려주고 중단
+    if not (username_val and pw_hash and cookie_key):
+        if _auth_conf("APP_PASSWORD"):
+            st.warning(
+                "🔐 새로운 로그인 방식으로 업그레이드되었습니다.\n\n"
+                "터미널에서 `.venv/bin/python set_auth.py` 를 실행해 "
+                "아이디·비밀번호를 먼저 설정해주세요."
+            )
+            st.stop()
+        return None, True  # 완전 오픈 (로컬 개발)
+
+    try:
+        import streamlit_authenticator as stauth
+    except ImportError:
+        st.error("streamlit-authenticator 패키지 필요: `pip install streamlit-authenticator`")
+        st.stop()
+
+    name_val = _auth_conf("AUTH_NAME", default=username_val)
+    expiry   = int(_auth_conf("AUTH_COOKIE_EXPIRY_DAYS", default="30") or "30")
+    cookie_name = _auth_conf("AUTH_COOKIE_NAME", default="stock_app_auth")
+
+    credentials = {
+        "usernames": {
+            username_val: {
+                "email": "user@local",
+                "name":  name_val,
+                "password": pw_hash,
+                "failed_login_attempts": 0,
+                "logged_in": False,
+            }
+        }
+    }
+
+    authenticator = stauth.Authenticate(
+        credentials,
+        cookie_name,
+        cookie_key,
+        expiry,
+    )
+
+    # v0.3+ API
+    try:
+        authenticator.login(location="main", fields={
+            "Form name": "로그인",
+            "Username": "아이디",
+            "Password": "비밀번호",
+            "Login": "로그인",
+        })
+    except TypeError:
+        # 구 버전 호환
+        authenticator.login("main")
+
+    status = st.session_state.get("authentication_status")
+    if status is True:
+        return authenticator, True
+    if status is False:
+        st.error("아이디 또는 비밀번호가 틀렸습니다.")
+    else:
+        st.info("아이디와 비밀번호를 입력하세요.")
+    return authenticator, False
+
+
+_authenticator, _is_auth = _run_auth()
+if not _is_auth:
     st.stop()
+
+# 로그아웃 버튼 (사이드바) — 로그인했을 때만 표시
+if _authenticator is not None:
+    with st.sidebar:
+        st.caption(f"👤 {st.session_state.get('name', '')}")
+        try:
+            _authenticator.logout("로그아웃", location="sidebar")
+        except TypeError:
+            _authenticator.logout("로그아웃", "sidebar")
 
 # ── Google Sheets 자동 동기화 ─────────────────────────────────
 # (1) 세션 최초 진입 시: 로컬 DB가 비어있고 시트에 데이터가 있으면 시트 → DB 로드
