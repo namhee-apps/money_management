@@ -53,7 +53,7 @@ from modules.stock_data import (
     get_stock_info, get_portfolio_summary, get_exchange_rate,
     get_exchange_rate_history, get_historical_exchange_rate,
     get_exchange_rate_long_history,
-    aggregate_stocks_by_ticker, get_price_history, get_stock_news, get_market_news, CURRENCY_LABELS,
+    aggregate_stocks_by_ticker, get_price_history, get_stock_news, get_market_news, get_keyword_news, CURRENCY_LABELS,
     _get_stock_native_currency,
 )
 from modules.analysis import run_daily_analysis, translate_news_batch, parse_transaction_screenshot
@@ -72,102 +72,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── 로그인 인증 (streamlit-authenticator: 아이디 + 해시된 비밀번호 + 서명 쿠키) ──
-def _auth_conf(key: str, default: str = "") -> str:
-    """AUTH_* 설정값을 st.secrets → os.environ 순으로 조회"""
-    try:
-        v = st.secrets.get(key, "")
-        if v:
-            return str(v)
-    except Exception:
-        pass
-    return os.environ.get(key, default)
-
-
-def _run_auth():
-    """
-    로그인 필요 여부를 판단하고, 필요하면 로그인 폼을 표시.
-    반환값: (authenticator, authenticated_bool)
-    AUTH_USERNAME/AUTH_PASSWORD_HASH/AUTH_COOKIE_KEY 미설정 시 인증 생략(로컬 개발용).
-    """
-    username_val = _auth_conf("AUTH_USERNAME")
-    pw_hash      = _auth_conf("AUTH_PASSWORD_HASH")
-    cookie_key   = _auth_conf("AUTH_COOKIE_KEY")
-
-    # 구 버전 APP_PASSWORD만 있고 새 AUTH_* 미설정 시 — 로그인 필요하다고 알려주고 중단
-    if not (username_val and pw_hash and cookie_key):
-        if _auth_conf("APP_PASSWORD"):
-            st.warning(
-                "🔐 새로운 로그인 방식으로 업그레이드되었습니다.\n\n"
-                "터미널에서 `.venv/bin/python set_auth.py` 를 실행해 "
-                "아이디·비밀번호를 먼저 설정해주세요."
-            )
-            st.stop()
-        return None, True  # 완전 오픈 (로컬 개발)
-
-    try:
-        import streamlit_authenticator as stauth
-    except ImportError:
-        st.error("streamlit-authenticator 패키지 필요: `pip install streamlit-authenticator`")
-        st.stop()
-
-    name_val = _auth_conf("AUTH_NAME", default=username_val)
-    expiry   = int(_auth_conf("AUTH_COOKIE_EXPIRY_DAYS", default="30") or "30")
-    cookie_name = _auth_conf("AUTH_COOKIE_NAME", default="stock_app_auth")
-
-    credentials = {
-        "usernames": {
-            username_val: {
-                "email": "user@local",
-                "name":  name_val,
-                "password": pw_hash,
-                "failed_login_attempts": 0,
-                "logged_in": False,
-            }
-        }
-    }
-
-    authenticator = stauth.Authenticate(
-        credentials,
-        cookie_name,
-        cookie_key,
-        expiry,
-    )
-
-    # v0.3+ API
-    try:
-        authenticator.login(location="main", fields={
-            "Form name": "로그인",
-            "Username": "아이디",
-            "Password": "비밀번호",
-            "Login": "로그인",
-        })
-    except TypeError:
-        # 구 버전 호환
-        authenticator.login("main")
-
-    status = st.session_state.get("authentication_status")
-    if status is True:
-        return authenticator, True
-    if status is False:
-        st.error("아이디 또는 비밀번호가 틀렸습니다.")
-    else:
-        st.info("아이디와 비밀번호를 입력하세요.")
-    return authenticator, False
-
-
-_authenticator, _is_auth = _run_auth()
-if not _is_auth:
-    st.stop()
-
-# 로그아웃 버튼 (사이드바) — 로그인했을 때만 표시
-if _authenticator is not None:
-    with st.sidebar:
-        st.caption(f"👤 {st.session_state.get('name', '')}")
-        try:
-            _authenticator.logout("로그아웃", location="sidebar")
-        except TypeError:
-            _authenticator.logout("로그아웃", "sidebar")
+# ── 로그인 인증 제거됨 ──
+# (자산 금액을 노출하지 않는 리서치 앱으로 전환하면서 아이디/비밀번호 로그인 삭제)
 
 # ── Google Sheets 자동 동기화 ─────────────────────────────────
 # (1) 세션 최초 진입 시: 로컬 DB가 비어있고 시트에 데이터가 있으면 시트 → DB 로드
@@ -183,18 +89,153 @@ try:
 except Exception:
     pass
 
-# ── 공통 스타일 ────────────────────────────────────────────────
+# ── 공통 스타일 (파스텔 테마) ──────────────────────────────────
 st.markdown("""
 <style>
-.metric-card {
-    background: #1e1e2e;
-    border-radius: 10px;
-    padding: 16px 20px;
-    margin-bottom: 8px;
+:root {
+    --pastel-purple: #b9a7f0;
+    --pastel-purple-soft: #ede9fe;
+    --pastel-pink: #f7c8e0;
+    --pastel-pink-soft: #fce7f3;
+    --pastel-mint: #c5ead6;
+    --ink: #4a4666;
+    --ink-soft: #8b86a8;
+    --card-border: #ece8f7;
 }
-.gain { color: #f38ba8; font-weight: bold; }
-.loss { color: #89dceb; font-weight: bold; }
-.ticker { font-size: 0.85em; color: #a6adc8; }
+
+/* 전체 배경 */
+.stApp { background: linear-gradient(180deg, #fbfaff 0%, #f7f4fe 100%); }
+.main .block-container { padding-top: 2.2rem; }
+
+/* 제목 */
+h1, h2, h3 { color: var(--ink) !important; letter-spacing: -0.01em; }
+h1 { font-weight: 800 !important; }
+
+/* ── 사이드바 ── */
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #f4f0fd 0%, #f9f0f8 100%);
+    border-right: 1px solid #efe9fb;
+}
+section[data-testid="stSidebar"] h1 {
+    font-size: 1.35rem !important; font-weight: 800 !important;
+    color: #7c5cd6 !important;
+}
+
+/* 사이드바 라디오 → 귀여운 아이콘 탭 버튼 */
+section[data-testid="stSidebar"] div[role="radiogroup"] { gap: 7px; }
+section[data-testid="stSidebar"] div[role="radiogroup"] > label {
+    background: #ffffff;
+    border: 1.5px solid var(--card-border);
+    border-radius: 14px;
+    padding: 11px 14px;
+    margin: 0;
+    cursor: pointer;
+    transition: all .16s ease;
+    font-weight: 600;
+    font-size: 0.97rem;
+    color: var(--ink);
+    box-shadow: 0 1px 3px rgba(140,120,200,.06);
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] > label:hover {
+    background: #f6f1ff;
+    border-color: #d9ccfa;
+    transform: translateX(3px);
+}
+/* 라디오 동그라미 숨김 */
+section[data-testid="stSidebar"] div[role="radiogroup"] > label > div:first-child {
+    display: none !important;
+}
+/* 선택된 탭 */
+section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) {
+    background: linear-gradient(135deg, var(--pastel-purple-soft), var(--pastel-pink-soft));
+    border-color: #c9b8fa;
+    color: #6d3fc4;
+    box-shadow: 0 3px 9px rgba(167,139,250,.22);
+}
+
+/* 메트릭 카드 */
+div[data-testid="stMetric"] {
+    background: #ffffff;
+    border: 1.5px solid var(--card-border);
+    border-radius: 16px;
+    padding: 14px 18px;
+    box-shadow: 0 2px 8px rgba(150,130,210,.06);
+}
+div[data-testid="stMetricValue"] { color: var(--ink); font-weight: 700; }
+
+/* 버튼 */
+.stButton > button {
+    border-radius: 12px;
+    border: 1.5px solid #e3d9fb;
+    background: #ffffff;
+    color: #6d3fc4;
+    font-weight: 600;
+    transition: all .15s ease;
+}
+.stButton > button:hover {
+    background: #f5f0ff; border-color: var(--pastel-purple); color: #5b2eb0;
+    transform: translateY(-1px);
+}
+.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, #b9a7f0, #e9a7d0);
+    border: none; color: #ffffff;
+    box-shadow: 0 3px 10px rgba(167,139,250,.3);
+}
+.stButton > button[kind="primary"]:hover { filter: brightness(1.05); color:#fff; }
+
+/* 표 */
+div[data-testid="stDataFrame"] {
+    border-radius: 14px; overflow: hidden;
+    border: 1.5px solid var(--card-border);
+    box-shadow: 0 2px 10px rgba(150,130,210,.06);
+}
+
+/* pills (그룹/기간 선택) */
+button[data-baseweb="tab"], div[data-testid="stPills"] button {
+    border-radius: 11px !important;
+}
+
+/* 확장 패널 */
+div[data-testid="stExpander"] {
+    border-radius: 14px; border: 1.5px solid var(--card-border);
+    background: #ffffff;
+}
+
+/* 구분선 연하게 */
+hr { border-color: #eee6fa !important; }
+
+/* 내 종목 커스텀 표 (셀 줄바꿈 → 글자 안 잘림) */
+.myst-wrap {
+    overflow-x: auto; border-radius: 16px;
+    border: 1.5px solid var(--card-border);
+    box-shadow: 0 2px 10px rgba(150,130,210,.07);
+    margin-bottom: 6px;
+}
+.myst-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; background: #ffffff; }
+.myst-table th {
+    background: linear-gradient(135deg, #f1ecfd, #fbeef6);
+    color: #6d3fc4; text-align: left; padding: 12px 15px;
+    font-weight: 700; border-bottom: 1px solid #ece8f7; white-space: nowrap;
+}
+.myst-table td {
+    padding: 11px 15px; border-bottom: 1px solid #f4effb;
+    color: var(--ink); vertical-align: top;
+}
+.myst-table tr:last-child td { border-bottom: none; }
+.myst-table tbody tr:hover td { background: #faf7ff; }
+.myst-table td.col-ticker { font-family: ui-monospace, monospace; color: var(--ink-soft); white-space: nowrap; }
+.myst-table td.col-name { font-weight: 600; }
+.myst-table td.col-flag { white-space: normal; line-height: 1.45; color: #5b5478; }
+.myst-table .tag {
+    display: inline-block; background: #f0ebfb; color: #6d3fc4;
+    border-radius: 8px; padding: 2px 9px; font-size: 0.85rem; font-weight: 600;
+}
+
+/* 기존 클래스 (오프라인 HTML 등 호환용) */
+.metric-card { background:#ffffff; border:1.5px solid var(--card-border); border-radius:16px; padding:16px 20px; margin-bottom:8px; }
+.gain { color: #e06b9a; font-weight: bold; }
+.loss { color: #5bb3c9; font-weight: bold; }
+.ticker { font-size: 0.85em; color: var(--ink-soft); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -210,18 +251,18 @@ def color_pct(v: float) -> str:
 
 
 # ── 사이드바 네비게이션 ────────────────────────────────────────
-st.sidebar.title("📊 주식 포트폴리오")
+st.sidebar.title("🔍 종목 리서치")
 page = st.sidebar.radio(
     "메뉴",
-    ["포트폴리오 현황", "종목 추가/관리", "투자 추천", "경제적 자유 계획", "환율 분석", "일일 리포트", "오프라인에서 보기", "설정"],
+    ["내 종목", "종목 상세 리서치", "투자 추천", "환율 인텔리전스", "키워드 뉴스", "종목 관리", "설정"],
+    key="nav_menu",
     format_func=lambda x: {
-        "포트폴리오 현황": "📊 포트폴리오 현황",
-        "종목 추가/관리": "➕ 종목 추가/관리",
+        "내 종목": "🔖 내 종목",
+        "종목 상세 리서치": "🔍 종목 상세 리서치",
         "투자 추천": "💡 투자 추천",
-        "경제적 자유 계획": "🏖️ 경제적 자유 계획",
-        "환율 분석": "💱 환율 분석",
-        "일일 리포트": "📅 일일 리포트",
-        "오프라인에서 보기": "📱 오프라인에서 보기",
+        "환율 인텔리전스": "💱 환율 인텔리전스",
+        "키워드 뉴스": "📰 키워드 뉴스",
+        "종목 관리": "➕ 종목 관리",
         "설정": "⚙️ 설정",
     }[x],
 )
@@ -1158,853 +1199,509 @@ def build_unified_keywords(news_by_ticker: dict, market_news: list) -> list:
     return build_unified_keywords_ai(titles_json)
 
 
+# ── 종목 업종/주요 사업 프로필 (캐시, 금액 비조회) ──────────────
+_SECTOR_KO = {
+    "Technology": "IT·기술",
+    "Communication Services": "통신·미디어",
+    "Consumer Cyclical": "자유소비재",
+    "Consumer Defensive": "필수소비재",
+    "Financial Services": "금융",
+    "Healthcare": "헬스케어",
+    "Industrials": "산업재",
+    "Energy": "에너지",
+    "Basic Materials": "소재",
+    "Utilities": "유틸리티",
+    "Real Estate": "부동산",
+}
+_INDUSTRY_KO = {
+    "Semiconductors": "반도체",
+    "Semiconductor Equipment & Materials": "반도체 장비·소재",
+    "Software—Infrastructure": "인프라 SW",
+    "Software—Application": "응용 SW",
+    "Internet Content & Information": "인터넷·콘텐츠",
+    "Internet Retail": "인터넷 유통",
+    "Consumer Electronics": "전자기기",
+    "Auto Manufacturers": "완성차",
+    "Auto Parts": "자동차 부품",
+    "Banks—Diversified": "은행",
+    "Banks—Regional": "지방은행",
+    "Drug Manufacturers—General": "제약",
+    "Biotechnology": "바이오",
+    "Aerospace & Defense": "항공·방산",
+    "Oil & Gas Integrated": "석유·가스",
+    "Asset Management": "자산운용",
+    "Information Technology Services": "IT 서비스",
+    "Specialty Retail": "전문 유통",
+    "Entertainment": "엔터테인먼트",
+    "Telecom Services": "통신 서비스",
+    "Capital Markets": "자본시장",
+    "Electronic Components": "전자 부품",
+    "Computer Hardware": "컴퓨터 하드웨어",
+    "Communication Equipment": "통신 장비",
+    "Credit Services": "신용·결제",
+    "Conglomerates": "복합기업·종합상사",
+    "Steel": "철강",
+    "Airlines": "항공",
+    "Railroads": "철도",
+    "Insurance—Diversified": "보험",
+    "Insurance—Life": "생명보험",
+    "Insurance—Property & Casualty": "손해보험",
+    "Insurance Brokers": "보험중개",
+    "Asset Management—Bonds": "채권운용",
+    "Software—Other": "소프트웨어",
+    "Information Technology Services ": "IT 서비스",
+    "REIT—Diversified": "리츠",
+    "REIT—Industrial": "물류 리츠",
+    "REIT—Residential": "주거 리츠",
+    "Building Products & Equipment": "건자재",
+    "Farm & Heavy Construction Machinery": "중장비",
+    "Specialty Industrial Machinery": "산업기계",
+    "Packaged Foods": "식품",
+    "Beverages—Non-Alcoholic": "음료",
+    "Restaurants": "외식",
+    "Discount Stores": "할인소매",
+    "Apparel Retail": "의류 유통",
+    "Apparel Manufacturing": "의류 제조",
+    "Medical Devices": "의료기기",
+    "Medical Instruments & Supplies": "의료기기·소모품",
+    "Utilities—Regulated Electric": "전력",
+    "Household & Personal Products": "생활용품",
+    "Travel Services": "여행 서비스",
+    "Luxury Goods": "명품",
+    "Tobacco": "담배",
+    "Gold": "금·귀금속",
+}
+
+
+def _norm_key(s: str) -> str:
+    """대시(— – -)·공백·대소문자 차이를 무시하기 위한 정규화 키."""
+    import re as _re3
+    return _re3.sub(r"[\s\-—–&]+", "", (s or "").lower())
+
+
+_SECTOR_KO_NORM = {_norm_key(k): v for k, v in _SECTOR_KO.items()}
+_INDUSTRY_KO_NORM = {_norm_key(k): v for k, v in _INDUSTRY_KO.items()}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _stock_profile_cached(ticker: str) -> dict:
+    """종목의 업종(sector)·주요 사업(industry) 조회. 시세·금액은 조회하지 않음."""
+    import yfinance as _yf
+    try:
+        info = _yf.Ticker(ticker).info or {}
+        sector = (info.get("sector") or "").strip()
+        industry = (info.get("industry") or "").strip()
+        quote_type = (info.get("quoteType") or "").upper()
+        category = (info.get("category") or "").strip()
+        if not sector and quote_type in ("ETF", "MUTUALFUND"):
+            return {"sector": "ETF·펀드", "industry": category or "지수·테마 추종", "is_etf": True}
+        return {
+            "sector": _SECTOR_KO_NORM.get(_norm_key(sector), sector),
+            "industry": _INDUSTRY_KO_NORM.get(_norm_key(industry), industry),
+            "is_etf": False,
+        }
+    except Exception:
+        return {"sector": "", "industry": "", "is_etf": False}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _etf_top_holdings_cached(ticker: str, n: int = 4) -> str:
+    """ETF 상위 보유 종목 'NVDA 8% · AAPL 7% ...' 문자열. 데이터 없으면 빈 문자열."""
+    import yfinance as _yf
+    try:
+        th = _yf.Ticker(ticker).funds_data.top_holdings
+        if th is None or th.empty:
+            return ""
+        parts = []
+        for sym, row in th.head(n).iterrows():
+            pct = row.get("Holding Percent", 0) or 0
+            parts.append(f"{sym} {pct*100:.0f}%")
+        return " · ".join(parts)
+    except Exception:
+        return ""
+
+
+@st.cache_data(ttl=604800, show_spinner=False)
+def _flagship_products_cached(items_json: str) -> dict:
+    """주식들의 주력 상품·서비스를 Claude로 일괄 생성. {ticker: '검색·Gemini'} 반환."""
+    import re as _re2
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    items = _json.loads(items_json)
+    if not api_key or not items:
+        return {}
+    listing = "\n".join(f"- {t} ({n})" for t, n in items)
+    prompt = (
+        "다음 각 기업의 '주력 상품·서비스·대표 브랜드'를 아주 짧게 알려줘.\n"
+        "규칙: 한국어 5~18자, 대표 제품/브랜드명 위주, 제품·브랜드명은 원어 유지.\n"
+        "예시: GOOGL → \"검색·Gemini·YouTube\", NVDA → \"GPU·AI가속칩\", "
+        "AAPL → \"iPhone·Mac\", MSFT → \"Azure·Office·Copilot\", AMZN → \"이커머스·AWS\".\n"
+        "반드시 아래 형식의 JSON만 출력 (설명·코드블록 금지):\n"
+        "{\"TICKER\": \"주력상품\", ...}\n\n"
+        f"{listing}"
+    )
+    try:
+        import anthropic as _anth_fp
+        client = _anth_fp.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        txt = resp.content[0].text.strip()
+        m = _re2.search(r"\{.*\}", txt, _re2.S)
+        return _json.loads(m.group(0)) if m else {}
+    except Exception:
+        return {}
+
+
 # ══════════════════════════════════════════════════════════════
-# 페이지 1: 포트폴리오 현황
+# 페이지 1: 내 종목
 # ══════════════════════════════════════════════════════════════
-if page == "포트폴리오 현황":
-    st.title("📊 포트폴리오 현황")
+if page == "내 종목":
+    st.title("🔖 내 종목")
+    st.caption("보유·관심 종목 목록입니다. 평가액·손익 등 자산 금액은 표시하지 않습니다. 상세 정보는 '🔍 종목 상세 리서치'에서 확인하세요.")
 
     stocks = get_all_stocks()
     if not stocks:
-        st.info("보유 종목이 없습니다. '종목 추가/관리' 메뉴에서 종목을 추가하세요.")
+        st.info("등록된 종목이 없습니다. '➕ 종목 관리' 메뉴에서 종목을 추가하세요.")
         st.stop()
 
     # 그룹 필터
     _all_groups = sorted({s.get("portfolio_group", "개별주식") for s in stocks})
     if len(_all_groups) > 1:
         _group_tabs = ["전체"] + _all_groups
-        _sel_group = st.pills("포트폴리오", _group_tabs, default="전체", key="pf_group_filter")
+        _sel_group = st.pills("그룹", _group_tabs, default="전체", key="myst_group_filter")
     else:
         _sel_group = "전체"
-
     if _sel_group and _sel_group != "전체":
         stocks = [s for s in stocks if s.get("portfolio_group", "개별주식") == _sel_group]
 
-    # 같은 티커 합산 후 계산
-    with st.spinner("주가 및 환율 데이터 불러오는 중..."):
-        aggregated = aggregate_stocks_by_ticker(stocks)
-        summary = get_portfolio_summary(aggregated)
-        jpy_rate = _jpy_rate_cached()
+    # 티커별 합산 (네트워크 호출 없이 보유 정보만 — 시세/평가액 조회하지 않음)
+    _by_ticker = {}
+    for s in stocks:
+        tk = s["ticker"]
+        if tk not in _by_ticker:
+            _by_ticker[tk] = {
+                "종목명": s.get("name", tk),
+                "티커": tk,
+                "수량": 0.0,
+                "매수횟수": 0,
+                "그룹": s.get("portfolio_group", "개별주식"),
+                "증권사": s.get("broker", "") or "",
+                "메모": s.get("notes", "") or "",
+            }
+        _by_ticker[tk]["수량"] += s.get("quantity", 0) or 0
+        _by_ticker[tk]["매수횟수"] += 1
 
-    items = summary["items"]
-    gain_krw = summary["total_gain_krw"]
-    gain_pct = summary["total_gain_pct"]
+    st.markdown(f"**총 {len(_by_ticker)}개 종목**")
 
-    # ── 오늘 스냅샷 자동 저장 (변동 추이 그래프용) ──────────────
-    _today_str = date.today().isoformat()
-    _today_snaps = get_snapshots_by_date(_today_str)
-    if not _today_snaps:
-        for _item in items:
-            save_snapshot(
-                date=_today_str,
-                ticker=_item["ticker"],
-                close_price=_item["current_price"],
-                current_exchange_rate=_item["current_rate"],
-                value_krw=_item["current_value_krw"],
-                daily_change_pct=_item.get("daily_change_pct", 0),
-            )
+    with st.spinner("업종·사업 정보 불러오는 중... (최초 1회만)"):
+        _sorted_v = sorted(_by_ticker.values(), key=lambda x: x["종목명"])
+        # 1) 업종 프로필 + ETF 여부
+        _profiles = {v["티커"]: _stock_profile_cached(v["티커"]) for v in _sorted_v}
+        # 2) 주식(비ETF)들의 주력 상품을 Claude로 일괄 생성
+        _equity_items = [[v["티커"], v["종목명"]] for v in _sorted_v
+                         if not _profiles[v["티커"]].get("is_etf")]
+        _flagship = _flagship_products_cached(_json.dumps(_equity_items, ensure_ascii=False)) if _equity_items else {}
 
-    # ── 확정 수익 (매도 손익 + 배당금) ────────────────────────
-    _all_sold = get_sold_history(limit=10000)
-    realized_total_krw = sum((r.get("realized_gain_krw") or 0) for r in _all_sold)
-    realized_count     = len(_all_sold)
-
-    _div_summary = get_dividend_summary()
-    _div_total_krw = _div_summary.get("total_krw") or 0
-    _div_count     = _div_summary.get("count") or 0
-    _confirmed_total_krw = realized_total_krw + _div_total_krw
-
-    # ── 상단 요약 카드 (JPY 기준, 모바일 2열 대응) ──────────────
-    def _short_jpy(krw_val):
-        """엔화 짧게: 10만 이상 → 만 단위"""
-        _j = (krw_val / jpy_rate) if jpy_rate > 0 else krw_val
-        if abs(_j) >= 10000:
-            return f"¥{_j/10000:.1f}만"
-        return f"¥{_j:,.0f}"
-
-    _r1c1, _r1c2, _r1c3 = st.columns(3)
-    with _r1c1:
-        st.metric("투자금", _short_jpy(summary["total_purchase_krw"]))
-    with _r1c2:
-        st.metric("평가액", _short_jpy(summary["total_current_krw"]))
-    with _r1c3:
-        gain_sign = "+" if gain_krw >= 0 else ""
-        st.metric("미실현 손익", _short_jpy(gain_krw), f"{gain_sign}{gain_pct:.1f}%")
-
-    _r2c1, _r2c2, _r2c3 = st.columns(3)
-    with _r2c1:
-        _confirmed_jpy = (_confirmed_total_krw / jpy_rate) if jpy_rate > 0 else _confirmed_total_krw
-        _conf_detail = f"{realized_count}건 매도"
-        if _div_count:
-            _conf_detail += f"+{_div_count}배당"
-        st.metric("확정 수익", _short_jpy(_confirmed_total_krw), _conf_detail)
-    with _r2c2:
-        st.metric("종목 수", f"{len(aggregated)}개")
-    with _r2c3:
-        _total_net_jpy_short = _short_jpy(gain_krw + _confirmed_total_krw)
-        st.metric("순손익 합계", _total_net_jpy_short)
-
-    # ── 전체 순손익 (미실현 + 확정) ───────────────────────────
-    total_net_krw = gain_krw + _confirmed_total_krw
-    total_net_jpy = (total_net_krw / jpy_rate) if jpy_rate > 0 else total_net_krw
-    if total_net_krw >= 0:
-        _net_bg     = "#f0f8f1"   # 연한 민트
-        _net_border = "#c8e6c9"
-        _net_color  = "#2e7d32"   # 짙은 그린
-    else:
-        _net_bg     = "#fbf1f1"   # 연한 분홍
-        _net_border = "#f5c6c8"
-        _net_color  = "#c62828"   # 짙은 레드
-    _net_sign  = "+" if total_net_krw >= 0 else ""
-    st.markdown(
-        f"<div style='background:{_net_bg}; border:1px solid {_net_border}; "
-        f"border-radius:10px; padding:14px 20px; margin:8px 0;'>"
-        f"<span style='color:#555;'>💰 <b>전체 순손익 (미실현 + 확정)</b> — </span>"
-        f"<span style='color:{_net_color}; font-size:1.25em; font-weight:bold;'>"
-        f"¥{_net_sign}{total_net_jpy:,.0f}</span>"
-        f"  <span style='color:#888;'>(₩{_net_sign}{total_net_krw:,.0f})</span>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
-    # 원화 참고 (접혀있음)
-    with st.expander("₩ 원화 기준 참고", expanded=False):
-        st.caption(
-            f"투자금 {format_krw(summary['total_purchase_krw'])} / "
-            f"평가액 {format_krw(summary['total_current_krw'])} / "
-            f"미실현 {format_krw(gain_krw)} ({gain_pct:+.2f}%) / "
-            f"확정 수익 {format_krw(realized_total_krw)} ({realized_count}건)"
-        )
-
-    st.markdown("---")
-
-    # ── 종목별 상세 테이블 ─────────────────────────────────────
-    st.subheader("종목별 현황 (티커별 합산)")
-
-    # 정렬 옵션
-    _sort_col1, _sort_col2 = st.columns([3, 2])
-    with _sort_col1:
-        _sort_by = st.selectbox("정렬 기준", [
-            "총수익률 높은 순", "총수익률 낮은 순",
-            "평가액 큰 순", "평가액 작은 순",
-            "당일등락 높은 순", "당일등락 낮은 순",
-            "종목명 (가나다순)",
-        ], key="sort_table")
-
-    # 정렬 적용
-    _sort_map = {
-        "총수익률 높은 순":   lambda i: -i["total_gain_pct"],
-        "총수익률 낮은 순":   lambda i: i["total_gain_pct"],
-        "평가액 큰 순":       lambda i: -i["current_value_krw"],
-        "평가액 작은 순":     lambda i: i["current_value_krw"],
-        "당일등락 높은 순":   lambda i: -i["daily_change_pct"],
-        "당일등락 낮은 순":   lambda i: i["daily_change_pct"],
-        "종목명 (가나다순)":  lambda i: i["name"],
-    }
-    _sorted_items = sorted(items, key=_sort_map.get(_sort_by, lambda i: -i["total_gain_pct"]))
-
-    sym_map = {"USD": "$", "JPY": "¥", "KRW": "₩"}
-    table_data = []
-    for item in _sorted_items:
-        _purchase_sym = sym_map.get(item["currency"], "$")
-        _native_cur = _get_stock_native_currency(item["ticker"])
-        _native_sym = sym_map.get(_native_cur, "$")
-
-        if _native_cur != item["currency"]:
-            _native_price = item.get("current_price", 0)
-            _native_to_krw = get_exchange_rate(_native_cur)
-            _purchase_to_krw = get_exchange_rate(item["currency"]) if item["currency"] != "KRW" else 1.0
-            if _native_to_krw > 0 and _purchase_to_krw > 0:
-                _orig_native = _native_price * _purchase_to_krw / _native_to_krw
+        table_rows = []
+        for v in _sorted_v:
+            _tk = v["티커"]
+            _prof = _profiles[_tk]
+            if _prof.get("is_etf"):
+                _flag = _etf_top_holdings_cached(_tk) or "보유종목 정보 없음"
+                _flag = "📊 " + _flag if _flag != "보유종목 정보 없음" else _flag
             else:
-                _orig_native = _native_price
-            _current_display = f"{_native_sym}{_orig_native:,.2f} ({_purchase_sym}{_native_price:,.0f})"
-            _purchase_display = f"{_purchase_sym}{item['purchase_price']:,.0f}"
-        else:
-            _current_display = f"{_purchase_sym}{item['current_price']:,.2f}"
-            _purchase_display = f"{_purchase_sym}{item['purchase_price']:,.2f}"
-
-        curr_jpy = format_jpy(item["current_value_krw"], jpy_rate)
-        gain_jpy = format_jpy(item["total_gain_krw"], jpy_rate)
-        agg = next((a for a in aggregated if a["ticker"] == item["ticker"]), None)
-        n_buys = len(agg["_entries"]) if agg and "_entries" in agg else 1
-        qty_label = f"{item['quantity']:.0f}주" + (f" ({n_buys}회 매수)" if n_buys > 1 else "")
-
-        table_data.append({
-            "종목명": item["name"],
-            "티커": item["ticker"],
-            "수량": qty_label,
-            "평균매수가": _purchase_display,
-            "현재가": _current_display,
-            "당일등락": f"{item['daily_change_pct']:+.2f}%",
-            "총수익률": f"{item['total_gain_pct']:+.2f}%",
-            "평가액(¥)": curr_jpy,
-            "손익(¥)": gain_jpy,
-        })
-
-    st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-
-    # ── 자산 변동 추이 (보유 종목 주가 히스토리 기반) ─────────────
-    st.subheader("📈 내 자산 변동 추이")
-
-    _period_opts = {"1주": 7, "2주": 14, "1개월": 30, "3개월": 90, "6개월": 180, "1년": 365, "3년": 1095, "5년": 1825}
-    _period_sel = st.pills("기간", list(_period_opts.keys()), default="3개월", key="val_hist_period")
-    _period_days = _period_opts.get(_period_sel, 90)
-
-    @st.cache_data(ttl=3600, show_spinner=False)
-    def _calc_portfolio_history(stocks_json: str, days: int) -> tuple:
-        """보유 종목의 주가+환율 히스토리로 포트폴리오 가치 추이 계산."""
-        import yfinance as _yf_hist
-        from datetime import timedelta as _td_hist
-        _stocks_list = _json.loads(stocks_json)
-        if not _stocks_list:
-            return [], []
-
-        _end_dt = datetime.now().strftime("%Y-%m-%d")
-        _start_dt = (datetime.now() - _td_hist(days=days + 10)).strftime("%Y-%m-%d")
-
-        # 티커별 보유 정보 집계: {ticker: [(quantity, purchase_date, currency), ...]}
-        _holdings = {}
-        for s in _stocks_list:
-            tk = s["ticker"]
-            if tk not in _holdings:
-                _holdings[tk] = []
-            _holdings[tk].append({
-                "qty": s["quantity"],
-                "date": s["purchase_date"],
-                "currency": s["purchase_currency"],
+                _flag = _flagship.get(_tk, "") or _flagship.get(_tk.upper(), "") or "—"
+            table_rows.append({
+                "종목명": v["종목명"],
+                "티커": _tk,
+                "업종": _prof.get("sector", "") or "—",
+                "주요 사업": _prof.get("industry", "") or "—",
+                "주력 사업·상품": _flag,
             })
 
-        # 주가 히스토리 조회
-        _tickers = list(_holdings.keys())
-        _price_data = {}  # {ticker: {date_str: close_price}}
-        for tk in _tickers:
-            try:
-                _t = _yf_hist.Ticker(tk)
-                _hist = _t.history(start=_start_dt, end=_end_dt)
-                if _hist.empty:
-                    continue
-                if _hist.index.tzinfo is not None:
-                    _hist.index = _hist.index.tz_localize(None)
-                _price_data[tk] = {
-                    idx.strftime("%Y-%m-%d"): float(row["Close"])
-                    for idx, row in _hist.iterrows()
-                }
-            except Exception:
-                continue
-
-        # 환율 히스토리 조회
-        _currencies = set()
-        for lots in _holdings.values():
-            for lot in lots:
-                if lot["currency"] != "KRW":
-                    _currencies.add(lot["currency"])
-
-        _fx_data = {}  # {currency: {date_str: rate_krw}}
-        _fx_symbols = {"USD": "USDKRW=X", "JPY": "JPYKRW=X"}
-        for cur in _currencies:
-            sym = _fx_symbols.get(cur)
-            if not sym:
-                continue
-            try:
-                _t = _yf_hist.Ticker(sym)
-                _hist = _t.history(start=_start_dt, end=_end_dt)
-                if _hist.empty:
-                    continue
-                if _hist.index.tzinfo is not None:
-                    _hist.index = _hist.index.tz_localize(None)
-                _fx_data[cur] = {
-                    idx.strftime("%Y-%m-%d"): float(row["Close"])
-                    for idx, row in _hist.iterrows()
-                }
-            except Exception:
-                continue
-
-        # 주가/환율 forward-fill: 휴일에는 직전 거래일 가격 사용
-        def _ffill(data_dict):
-            """날짜→값 dict를 정렬 후, 빠진 날짜를 직전 값으로 채운 dict 반환."""
-            if not data_dict:
-                return {}
-            sorted_dates = sorted(data_dict.keys())
-            return {d: data_dict[d] for d in sorted_dates}
-
-        def _get_price_ffill(data_dict, target_date):
-            """target_date 이하의 가장 가까운 가격 반환."""
-            if not data_dict:
-                return 0
-            if target_date in data_dict:
-                return data_dict[target_date]
-            # 직전 거래일 가격 사용
-            _prev = [d for d in data_dict if d <= target_date]
-            return data_dict[_prev[-1]] if _prev else 0
-
-        # 공통 날짜 구하기 (모든 시장의 거래일 합집합)
-        _all_dates = set()
-        for prices in _price_data.values():
-            _all_dates.update(prices.keys())
-        if not _all_dates:
-            return [], []
-        _all_dates = sorted(_all_dates)[-days:]
-
-        # 날짜별 포트폴리오 가치 계산
-        _dates_out = []
-        _values_out = []
-        for d in _all_dates:
-            _total = 0.0
-            _valid = False
-            for tk, lots in _holdings.items():
-                if tk not in _price_data:
-                    continue
-                # 해당 날짜 주가 없으면 직전 거래일 가격 사용
-                _price = _get_price_ffill(_price_data[tk], d)
-                if _price <= 0:
-                    continue
-                # 이 날짜에 보유 중인 수량 합산 (매수일 <= 날짜)
-                _qty = sum(lot["qty"] for lot in lots if lot["date"] <= d)
-                if _qty <= 0:
-                    continue
-                _cur = lots[0]["currency"]
-                if _cur == "KRW":
-                    _fx = 1.0
-                else:
-                    _fx = _get_price_ffill(_fx_data.get(_cur, {}), d)
-                    if _fx <= 0:
-                        continue
-                _total += _price * _qty * _fx
-                _valid = True
-            if _valid and _total > 0:
-                _dates_out.append(d)
-                _values_out.append(_total)
-        return _dates_out, _values_out
-
-    # 캐시 키용 JSON (stocks 변경 시 재계산)
-    _stocks_for_hist = _json.dumps(
-        [{"ticker": s["ticker"], "quantity": s["quantity"],
-          "purchase_date": s["purchase_date"], "purchase_currency": s["purchase_currency"]}
-         for s in stocks],
-        ensure_ascii=False,
-    )
-
-    with st.spinner("자산 변동 추이 계산 중..."):
-        _vh_dates, _vh_values = _calc_portfolio_history(stocks_json=_stocks_for_hist, days=_period_days)
-
-    if _vh_dates and len(_vh_dates) >= 2:
-        # 투자금 라인 계산 (매수일 <= 날짜인 종목의 매수금액 합산)
-        _invest_values = []
-        for d in _vh_dates:
-            _inv_total = 0.0
-            for s in stocks:
-                if s["purchase_date"] <= d:
-                    if s["purchase_currency"] == "KRW":
-                        _inv_total += s["purchase_price"] * s["quantity"]
-                    else:
-                        _inv_total += s["purchase_price"] * s["quantity"] * s["purchase_exchange_rate"]
-            _invest_values.append(_inv_total)
-
-        _vh_change = _vh_values[-1] - _vh_values[0]
-        _vh_change_pct = (_vh_change / _vh_values[0] * 100) if _vh_values[0] else 0
-        _vh_jpy = jpy_rate if jpy_rate > 0 else 1
-
-        def _fmt_jpy(v):
-            """엔화 짧게 표시: 100만 이상 → 만 단위"""
-            _j = v / _vh_jpy
-            if abs(_j) >= 10000:
-                return f"¥{_j/10000:.1f}만"
-            return f"¥{_j:,.0f}"
-
-        _mc1, _mc2 = st.columns(2)
-        with _mc1:
-            st.metric("현재 평가금", _fmt_jpy(_vh_values[-1]))
-        with _mc2:
-            st.metric("기간 변동", _fmt_jpy(_vh_change), f"{_vh_change_pct:+.1f}%")
-        _mc3, _mc4 = st.columns(2)
-        with _mc3:
-            st.metric("기간 최고", _fmt_jpy(max(_vh_values)))
-        with _mc4:
-            st.metric("기간 최저", _fmt_jpy(min(_vh_values)))
-
-        _vh_color = "#2196F3" if _vh_values[-1] >= _vh_values[0] else "#f44336"
-        _fig_vh = go.Figure()
-        _fig_vh.add_trace(go.Scatter(
-            x=_vh_dates, y=_vh_values,
-            name="평가금액",
-            mode="lines",
-            line=dict(color=_vh_color, width=2.5),
-            fill="tonexty" if _invest_values else "tozeroy",
-            hovertemplate="<b>%{x}</b><br>평가: ₩%{y:,.0f}<extra></extra>",
-        ))
-        if _invest_values:
-            # 투자금 라인을 먼저 그려야 fill="tonexty"가 제대로 작동
-            _fig_vh.data = ()  # 초기화 후 순서 재배치
-            _fig_vh.add_trace(go.Scatter(
-                x=_vh_dates, y=_invest_values,
-                name="투자금",
-                mode="lines",
-                line=dict(color="#9E9E9E", width=1.5, dash="dot"),
-                hovertemplate="<b>%{x}</b><br>투자금: ₩%{y:,.0f}<extra></extra>",
-            ))
-            _fig_vh.add_trace(go.Scatter(
-                x=_vh_dates, y=_vh_values,
-                name="평가금액",
-                mode="lines",
-                line=dict(color=_vh_color, width=2.5),
-                fill="tonexty",
-                fillcolor="rgba(33,150,243,0.15)" if _vh_color == "#2196F3" else "rgba(244,67,54,0.15)",
-                hovertemplate="<b>%{x}</b><br>평가: ₩%{y:,.0f}<extra></extra>",
-            ))
-        _fig_vh.update_layout(
-            height=350,
-            margin=dict(t=10, b=30, l=40, r=10),
-            yaxis_title="",
-            yaxis_tickformat=",",
-            yaxis_tickfont=dict(size=10),
-            xaxis_tickfont=dict(size=10),
-            xaxis_title="",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10)),
-            hovermode="x unified",
+    import html as _html_esc
+    _rows_html = ""
+    for r in table_rows:
+        _sector_tag = f'<span class="tag">{_html_esc.escape(r["업종"])}</span>' if r["업종"] != "—" else "—"
+        _rows_html += (
+            "<tr>"
+            f'<td class="col-name">{_html_esc.escape(r["종목명"])}</td>'
+            f'<td class="col-ticker">{_html_esc.escape(r["티커"])}</td>'
+            f'<td>{_sector_tag}</td>'
+            f'<td>{_html_esc.escape(r["주요 사업"])}</td>'
+            f'<td class="col-flag">{_html_esc.escape(r["주력 사업·상품"])}</td>'
+            "</tr>"
         )
-        st.plotly_chart(_fig_vh, use_container_width=True)
-    elif _vh_dates:
-        st.info("데이터가 부족합니다. 보유 기간이 길어지면 그래프가 표시됩니다.")
-    else:
-        st.info("주가 히스토리를 가져올 수 없습니다. 종목을 추가하면 자동으로 표시됩니다.")
-
-    st.markdown("---")
-
-    # ── 차트 ──────────────────────────────────────────────────
-    st.subheader("포트폴리오 비중")
-    # 보유량 큰 순으로 정렬 (시계방향)
-    _pie_items = sorted(items, key=lambda i: i["current_value_krw"], reverse=True)
-    _pie_labels = [i["name"] for i in _pie_items]
-    _pie_values = [i["current_value_krw"] for i in _pie_items]
-
-    # 수익률 기반 색상: 양수=파란색(진할수록 높음), 음수=빨간색(진할수록 낮음)
-    _pie_colors = []
-    for i in _pie_items:
-        pct = i["total_gain_pct"]
-        if pct >= 0:
-            # 파란 계열: 수익률 높을수록 진한 파랑
-            intensity = min(1.0, pct / 50.0)  # 50%에서 최대 진하기
-            r = int(200 - 140 * intensity)
-            g = int(210 - 100 * intensity)
-            b = int(255 - 30 * intensity)
-            _pie_colors.append(f"rgb({r},{g},{b})")
-        else:
-            # 빨간 계열: 손실 클수록 진한 빨강
-            intensity = min(1.0, abs(pct) / 50.0)
-            r = int(255 - 30 * intensity)
-            g = int(200 - 140 * intensity)
-            b = int(200 - 140 * intensity)
-            _pie_colors.append(f"rgb({r},{g},{b})")
-
-    # 종목명 짧게 줄이기 (모바일 대응)
-    _pie_short_labels = []
-    for _pl in _pie_labels:
-        if len(_pl) > 12:
-            _pie_short_labels.append(_pl[:10] + "..")
-        else:
-            _pie_short_labels.append(_pl)
-
-    _n_items = len(_pie_labels)
-    fig = go.Figure(data=[go.Pie(
-        labels=_pie_short_labels,
-        values=_pie_values,
-        hole=0.35,
-        textinfo="label+percent",
-        textposition="inside",
-        insidetextorientation="horizontal",
-        pull=[0.02] * len(_pie_labels),
-        marker=dict(colors=_pie_colors),
-        sort=False,
-        direction="clockwise",
-        hovertemplate="<b>%{label}</b><br>비중: %{percent}<extra></extra>",
-    )])
-    fig.update_layout(
-        margin=dict(t=20, b=20, l=20, r=20),
-        height=max(400, 350 + _n_items * 8),
-        showlegend=True,
-        legend=dict(
-            orientation="h",
-            yanchor="top",
-            y=-0.05,
-            xanchor="center",
-            x=0.5,
-            font=dict(size=11),
-        ),
+    st.markdown(
+        '<div class="myst-wrap"><table class="myst-table"><thead><tr>'
+        '<th>종목명</th><th>티커</th><th>업종</th><th>주요 사업</th><th>주력 사업·상품</th>'
+        f'</tr></thead><tbody>{_rows_html}</tbody></table></div>',
+        unsafe_allow_html=True,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.caption("💡 주식의 주력 상품은 AI 생성(설정에 Anthropic API 키 필요), ETF는 상위 보유 종목입니다.")
 
     st.markdown("---")
 
-    st.subheader("수익 구성 (주가 vs 환율)")
-    fx_items = [i for i in items if i["currency"] != "KRW"]
-    if fx_items:
-        fig2 = go.Figure(data=[
-            go.Bar(name="주가 수익 (¥)",
-                   x=[i["ticker"] for i in fx_items],
-                   y=[i["stock_gain_krw"] / jpy_rate for i in fx_items],
-                   marker_color="#a6e3a1"),
-            go.Bar(name="환율 수익 (¥)",
-                   x=[i["ticker"] for i in fx_items],
-                   y=[i["fx_gain_krw"] / jpy_rate for i in fx_items],
-                   marker_color="#89b4fa"),
-        ])
-        fig2.update_layout(barmode="group", height=400,
-                           margin=dict(t=20, b=40, l=60, r=20),
-                           yaxis_title="JPY")
-        st.plotly_chart(fig2, use_container_width=True)
+    # ── 빠른 상세 리서치 이동 ──────────────────────────────────
+    _ticker_names = {f"{v['종목명']} ({v['티커']})": v["티커"] for v in _by_ticker.values()}
+    _pick = st.selectbox(
+        "🔍 상세 리서치로 이동할 종목 선택",
+        ["선택..."] + sorted(_ticker_names.keys()),
+        key="myst_jump_pick",
+    )
+    if _pick and _pick != "선택...":
+        if st.button("🔍 상세 리서치 보기", type="primary", key="myst_jump_btn"):
+            st.session_state["research_sel"] = _pick
+            st.session_state["nav_menu"] = "종목 상세 리서치"
+            st.rerun()
+
+
+
+
+
+# ══════════════════════════════════════════════════════════════
+# 페이지: 종목 상세 리서치
+# ══════════════════════════════════════════════════════════════
+elif page == "종목 상세 리서치":
+    st.title("🔍 종목 상세 리서치")
+    st.caption("종목의 기업 정보·시세 차트·배당·뉴스·AI 전망을 한 화면에서 확인합니다. (자산 평가액은 표시하지 않습니다)")
+
+    _held = get_all_stocks()
+    _held_tickers = sorted({s["ticker"] for s in _held})
+    _held_names = {s["ticker"]: s.get("name", s["ticker"]) for s in _held}
+    _held_opts = [f"{_held_names[t]} ({t})" for t in _held_tickers]
+
+    _sel = st.selectbox("보유 종목에서 선택", ["(직접 입력)"] + _held_opts, key="research_sel")
+    if _sel == "(직접 입력)":
+        ticker = st.text_input("티커 직접 입력 (예: AAPL, 7203.T, 005930.KS, NVDA)", key="research_typed").strip()
     else:
-        st.info("외화 종목이 없어 환율 수익 비교를 표시할 수 없습니다.")
+        ticker = _sel.rsplit("(", 1)[-1].rstrip(")").strip()
+
+    if not ticker:
+        st.info("보유 종목을 선택하거나 티커를 입력하세요.")
+        st.stop()
+
+    @st.cache_data(ttl=900, show_spinner=False)
+    def _research_info(tk: str) -> dict:
+        """yfinance 상세 펀더멘털 조회."""
+        import yfinance as _yf
+        try:
+            t = _yf.Ticker(tk)
+            info = t.info or {}
+            return {
+                "name": info.get("longName") or info.get("shortName") or tk,
+                "sector": info.get("sector", ""),
+                "industry": info.get("industry", ""),
+                "country": info.get("country", ""),
+                "currency": info.get("currency", ""),
+                "summary": info.get("longBusinessSummary", ""),
+                "website": info.get("website", ""),
+                "price": info.get("currentPrice") or info.get("regularMarketPrice") or 0.0,
+                "prev_close": info.get("previousClose") or 0.0,
+                "market_cap": info.get("marketCap") or 0,
+                "trailing_pe": info.get("trailingPE"),
+                "forward_pe": info.get("forwardPE"),
+                "peg": info.get("pegRatio"),
+                "pb": info.get("priceToBook"),
+                "div_yield": info.get("dividendYield"),
+                "div_rate": info.get("dividendRate"),
+                "beta": info.get("beta"),
+                "high_52w": info.get("fiftyTwoWeekHigh"),
+                "low_52w": info.get("fiftyTwoWeekLow"),
+                "target_mean": info.get("targetMeanPrice"),
+                "recommendation": info.get("recommendationKey", ""),
+                "profit_margin": info.get("profitMargins"),
+                "revenue_growth": info.get("revenueGrowth"),
+            }
+        except Exception as e:
+            return {"name": tk, "error": str(e)}
+
+    with st.spinner(f"{ticker} 기업 정보 불러오는 중..."):
+        info = _research_info(ticker)
+
+    _cur_sym = {"USD": "$", "JPY": "¥", "KRW": "₩"}.get(info.get("currency", ""), "")
+
+    # ── 헤더: 종목명 + 현재가 ────────────────────────────────
+    st.markdown(f"## {info.get('name', ticker)}  `{ticker}`")
+    _meta_bits = []
+    if info.get("sector"):
+        _meta_bits.append(f"🏢 {info['sector']}")
+    if info.get("industry"):
+        _meta_bits.append(info["industry"])
+    if info.get("country"):
+        _meta_bits.append(f"📍 {info['country']}")
+    if _meta_bits:
+        st.caption(" · ".join(_meta_bits))
+
+    _price = info.get("price") or 0.0
+    _prev = info.get("prev_close") or 0.0
+    _chg_pct = ((_price - _prev) / _prev * 100) if _prev else 0.0
+    _pc1, _pc2, _pc3 = st.columns(3)
+    with _pc1:
+        st.metric("현재가", f"{_cur_sym}{_price:,.2f}" if _price else "—",
+                  f"{_chg_pct:+.2f}%" if _prev else None)
+    with _pc2:
+        _mc = info.get("market_cap") or 0
+        if _mc >= 1e12:
+            _mc_s = f"{_mc/1e12:.2f}조"
+        elif _mc >= 1e8:
+            _mc_s = f"{_mc/1e8:.0f}억"
+        else:
+            _mc_s = f"{_mc:,.0f}" if _mc else "—"
+        st.metric("시가총액", f"{_cur_sym}{_mc_s}" if _mc else "—")
+    with _pc3:
+        _dy = info.get("div_yield")
+        st.metric("배당수익률", f"{_dy*100:.2f}%" if _dy else "—")
+
+    # ── 핵심 지표 ────────────────────────────────────────────
+    st.markdown("#### 📊 핵심 지표")
+    def _fmt_num(v, suffix="", pct=False, mult=1):
+        if v is None:
+            return "—"
+        try:
+            if pct:
+                return f"{v*mult:.2f}%"
+            return f"{v:,.2f}{suffix}"
+        except Exception:
+            return "—"
+    _m = st.columns(4)
+    _m[0].metric("PER (TTM)", _fmt_num(info.get("trailing_pe")))
+    _m[1].metric("선행 PER", _fmt_num(info.get("forward_pe")))
+    _m[2].metric("PBR", _fmt_num(info.get("pb")))
+    _m[3].metric("베타", _fmt_num(info.get("beta")))
+    _m2 = st.columns(4)
+    _m2[0].metric("52주 최고", f"{_cur_sym}{info['high_52w']:,.2f}" if info.get("high_52w") else "—")
+    _m2[1].metric("52주 최저", f"{_cur_sym}{info['low_52w']:,.2f}" if info.get("low_52w") else "—")
+    _m2[2].metric("영업이익률", _fmt_num(info.get("profit_margin"), pct=True, mult=100))
+    _m2[3].metric("매출성장률", _fmt_num(info.get("revenue_growth"), pct=True, mult=100))
+    if info.get("target_mean"):
+        _tgt = info["target_mean"]
+        _upside = ((_tgt - _price) / _price * 100) if _price else 0.0
+        st.caption(f"🎯 애널리스트 목표주가 평균: {_cur_sym}{_tgt:,.2f} ({_upside:+.1f}%) · 컨센서스: {info.get('recommendation','-')}")
 
     st.markdown("---")
 
-    # ── 배당금 섹션 ──────────────────────────────────────────────
-    st.subheader("💰 배당금")
+    # ── 주가 차트 ────────────────────────────────────────────
+    st.markdown("#### 📈 주가 차트")
+    _chart_periods = {"1개월": 30, "3개월": 90, "6개월": 180, "1년": 365, "3년": 1095}
+    _cp = st.pills("기간", list(_chart_periods.keys()), default="6개월", key="research_chart_period")
+    _cdays = _chart_periods.get(_cp, 180)
+    with st.spinner("차트 불러오는 중..."):
+        _hist = get_price_history(ticker, days=_cdays)
+    if _hist is not None and not _hist.empty:
+        _fig = go.Figure()
+        _fig.add_trace(go.Scatter(x=_hist.index, y=_hist["price"], mode="lines",
+                                  line=dict(color="#4a9eff", width=2), name="종가"))
+        _fig.update_layout(height=360, margin=dict(l=0, r=0, t=10, b=0),
+                           xaxis_title=None, yaxis_title=f"가격 ({info.get('currency','')})",
+                           hovermode="x unified")
+        st.plotly_chart(_fig, use_container_width=True)
+    else:
+        st.caption("차트 데이터를 불러올 수 없습니다.")
 
-    _div_tab_info, _div_tab_auto, _div_tab_input, _div_tab_history = st.tabs([
-        "📅 배당 일정 & 수익률", "🔍 배당 자동 감지", "✏️ 배당금 수동 입력", "📋 배당 이력"
-    ])
-
-    # ═══ 탭1: 배당 일정 & 수익률 (yfinance 자동) ═══════════════
-    with _div_tab_info:
-        st.caption("보유 종목의 배당 정보를 Yahoo Finance에서 자동 조회합니다.")
-        import yfinance as _yf_div
-
-        _div_data = []
-        with st.spinner("배당 정보 조회 중..."):
-            for item in items:
-                try:
-                    _tk = _yf_div.Ticker(item["ticker"])
-                    _info = _tk.info
-
-                    # 주식의 실제 통화 (yfinance에서 직접 가져옴)
-                    _stock_cur = (_info.get("currency") or "USD").upper()
-                    _stock_sym = {"USD": "$", "JPY": "¥", "KRW": "₩"}.get(_stock_cur, "$")
-
-                    # 배당수익률: yfinance는 이미 % 값으로 줌 (예: 1.81 = 1.81%)
-                    _yield_raw = _info.get("dividendYield") or 0
-                    _yield = _yield_raw if _yield_raw < 1 else _yield_raw  # 이미 % 값
-
-                    _rate_annual = _info.get("dividendRate") or 0  # 주식 통화 기준
-
-                    # dividendRate가 None인 종목 → 최근 배당 이력에서 연간 금액 추정
-                    _divs = _tk.dividends
-                    if _rate_annual <= 0 and not _divs.empty:
-                        # 최근 1년치 배당 합산 or 최근 4건 합산
-                        from datetime import timedelta as _td_div2
-                        _one_year_ago = datetime.now() - _td_div2(days=400)
-                        _recent = _divs[_divs.index >= str(_one_year_ago)]
-                        if not _recent.empty:
-                            _rate_annual = float(_recent.sum())
-                        else:
-                            _rate_annual = float(_divs.tail(4).sum())
-
-                    _ex_date = _info.get("exDividendDate")
-                    if _ex_date and isinstance(_ex_date, (int, float)):
-                        from datetime import datetime as _dt_div
-                        _ex_date = _dt_div.fromtimestamp(_ex_date).strftime("%Y-%m-%d")
-                    elif not _ex_date:
-                        _ex_date = "-"
-
-                    # 최근 배당 이력 (_divs는 위에서 이미 조회됨)
-                    _last_div = f"{_stock_sym}{float(_divs.iloc[-1]):,.2f}" if not _divs.empty else "-"
-                    _last_date = _divs.index[-1].strftime("%Y-%m-%d") if not _divs.empty else "-"
-
-                    # 예상 연간 배당 (엔화 변환)
-                    if _rate_annual > 0 and jpy_rate > 0:
-                        if _stock_cur == "JPY":
-                            _est_annual_jpy = _rate_annual * item["quantity"]
-                        elif _stock_cur == "USD":
-                            _usd_krw = get_exchange_rate("USD")
-                            _est_annual_jpy = _rate_annual * item["quantity"] * _usd_krw / jpy_rate
-                        else:
-                            _est_annual_jpy = _rate_annual * item["quantity"]
-                        _est_str = f"¥{_est_annual_jpy:,.0f}"
-                    else:
-                        _est_annual_jpy = 0
-                        _est_str = "-"
-
-                    _div_data.append({
-                        "종목": f"{item['name']} ({item['ticker']})",
-                        "배당수익률": f"{_yield:.2f}%" if _yield > 0 else "-",
-                        "연간배당금": f"{_stock_sym}{_rate_annual:,.2f}" if _rate_annual > 0 else "-",
-                        "최근배당": _last_div,
-                        "최근배당일": _last_date,
-                        "배당락일": str(_ex_date),
-                        "보유수량": f"{item['quantity']:.0f}주",
-                        "예상연간(¥)": _est_str,
-                    })
-                except Exception:
-                    _div_data.append({
-                        "종목": f"{item['name']} ({item['ticker']})",
-                        "배당수익률": "-", "연간배당금": "-",
-                        "최근배당": "-", "최근배당일": "-",
-                        "배당락일": "-", "보유수량": f"{item['quantity']:.0f}주",
-                        "예상연간(¥)": "-",
-                    })
-
-        if _div_data:
-            st.dataframe(pd.DataFrame(_div_data), use_container_width=True, hide_index=True)
-
-            # 예상 연간 배당금 합계
-            _total_est_div = sum(
-                float(d["예상연간(¥)"].replace("¥","").replace(",",""))
-                for d in _div_data if d["예상연간(¥)"] != "-"
-            )
-            if _total_est_div > 0:
-                st.info(f"💰 예상 연간 배당 수입: **¥{_total_est_div:,.0f}**")
-
-    # ═══ 탭2: 배당 자동 감지 ═══════════════════════════════════
-    with _div_tab_auto:
-        st.caption("보유 종목의 실제 배당 히스토리를 조회해서, 보유 기간 중 받았어야 할 배당을 자동으로 찾습니다.")
-
-        # session_state로 감지 결과 유지
-        if "div_auto_missing" not in st.session_state:
-            st.session_state.div_auto_missing = None
-
-        if st.button("🔍 배당 자동 감지 실행", type="primary", key="div_auto_detect"):
-            import yfinance as _yf_div_auto
-            _all_stocks_raw = get_all_stocks()
-            _existing_divs = get_dividends()
-
-            _existing_set = set()
-            for _ed in _existing_divs:
-                _existing_set.add((_ed["ticker"].upper(), _ed["payment_date"]))
-
-            _holdings_by_ticker = {}
-            for _s in _all_stocks_raw:
-                _tk = _s["ticker"].upper()
-                if _tk not in _holdings_by_ticker:
-                    _holdings_by_ticker[_tk] = []
-                _holdings_by_ticker[_tk].append({
-                    "purchase_date": _s["purchase_date"],
-                    "quantity": _s["quantity"],
-                    "currency": _s["purchase_currency"],
-                    "broker": _s.get("broker", ""),
-                    "account_type": _s.get("account_type", "일반계좌"),
-                    "name": _s["name"],
-                })
-
-            _missing_divs = []
-            _found_count = 0
-
-            with st.spinner("보유 종목 배당 히스토리 조회 중..."):
-                for _tk, _lots in _holdings_by_ticker.items():
+    # ── 기업 개요 ────────────────────────────────────────────
+    if info.get("summary"):
+        with st.expander("🏢 기업 개요 (사업 내용)", expanded=False):
+            st.write(info["summary"])
+            if info.get("website"):
+                st.caption(f"🔗 {info['website']}")
+            _has_api_ov = bool(os.getenv("ANTHROPIC_API_KEY", ""))
+            if _has_api_ov and st.button("🇰🇷 한국어로 요약", key="research_summary_ko"):
+                with st.spinner("번역·요약 중..."):
                     try:
-                        _t = _yf_div_auto.Ticker(_tk)
-                        _divs = _t.dividends
-                        if _divs is None or _divs.empty:
-                            continue
-                        _stock_cur = (_t.info.get("currency") or "USD").upper()
-                        _stock_sym = {"USD": "$", "JPY": "¥", "KRW": "₩"}.get(_stock_cur, "$")
-
-                        if _divs.index.tzinfo is not None:
-                            _divs.index = _divs.index.tz_localize(None)
-
-                        for _div_date, _div_amt in _divs.items():
-                            _div_date_str = _div_date.strftime("%Y-%m-%d")
-                            _found_count += 1
-
-                            if (_tk, _div_date_str) in _existing_set:
-                                continue
-
-                            _qty = sum(
-                                lot["quantity"] for lot in _lots
-                                if lot["purchase_date"] <= _div_date_str
-                            )
-                            if _qty <= 0:
-                                continue
-
-                            _missing_divs.append({
-                                "ticker": _tk,
-                                "name": _lots[0]["name"],
-                                "date": _div_date_str,
-                                "amount_per_share": float(_div_amt),
-                                "quantity": _qty,
-                                "total": float(_div_amt) * _qty,
-                                "currency": _stock_cur,
-                                "symbol": _stock_sym,
-                                "broker": _lots[0]["broker"],
-                                "account_type": _lots[0]["account_type"],
-                            })
-                    except Exception:
-                        continue
-
-            _missing_divs.sort(key=lambda x: x["date"], reverse=True)
-            st.session_state.div_auto_missing = _missing_divs
-            st.session_state.div_auto_found = _found_count
-
-        # 감지 결과 표시
-        _missing = st.session_state.div_auto_missing
-        if _missing is not None:
-            if _missing:
-                st.warning(f"📌 **{len(_missing)}건**의 미등록 배당을 발견했습니다!")
-
-                _preview_data = []
-                for _md in _missing:
-                    _preview_data.append({
-                        "지급일": _md["date"],
-                        "종목": f"{_md['name']} ({_md['ticker']})",
-                        "1주당": f"{_md['symbol']}{_md['amount_per_share']:,.4f}",
-                        "보유수량": f"{_md['quantity']:.0f}주",
-                        "배당합계": f"{_md['symbol']}{_md['total']:,.2f}",
-                        "계좌": _md["account_type"],
-                    })
-                st.dataframe(pd.DataFrame(_preview_data), use_container_width=True, hide_index=True)
-
-                if st.button(f"✅ {len(_missing)}건 전체 배당 일괄 등록", type="primary", key="div_auto_register"):
-                    _reg_count = 0
-                    with st.spinner("배당 등록 중..."):
-                        for _md in _missing:
-                            _cur = _md["currency"]
-                            if _cur != "KRW":
-                                try:
-                                    _fx, _ = get_historical_exchange_rate(_cur, _md["date"])
-                                except Exception:
-                                    _fx = get_exchange_rate(_cur)
-                            else:
-                                _fx = 1.0
-                            _total_krw = _md["total"] * _fx
-                            add_dividend(
-                                ticker=_md["ticker"],
-                                name=_md["name"],
-                                payment_date=_md["date"],
-                                amount_per_share=_md["amount_per_share"],
-                                currency=_cur,
-                                exchange_rate=_fx,
-                                quantity=_md["quantity"],
-                                total_amount=_md["total"],
-                                total_amount_krw=_total_krw,
-                                broker=_md["broker"],
-                                account_type=_md["account_type"],
-                                notes="자동 감지",
-                            )
-                            _reg_count += 1
-                    st.session_state.div_auto_missing = None
-                    st.success(f"✅ {_reg_count}건 배당 등록 완료! '📋 배당 이력' 탭에서 확인하세요.")
-                    st.rerun()
-            elif st.session_state.get("div_auto_found", 0) > 0:
-                st.success("✅ 모든 배당이 이미 등록되어 있습니다!")
-            else:
-                st.info("배당 이력이 있는 종목이 없습니다.")
-
-    # ═══ 탭3: 배당금 수동 입력 ═══════════════════════════════════
-    with _div_tab_input:
-        st.caption("받은 배당금을 입력하면 확정 수익에 자동 합산됩니다.")
-
-        _div_stocks = get_all_stocks()
-        if not _div_stocks:
-            st.info("보유 종목이 없습니다.")
-        else:
-            _div_seen, _div_unique = set(), []
-            for _s in sorted(_div_stocks, key=lambda x: x["ticker"]):
-                if _s["ticker"] not in _div_seen:
-                    _div_seen.add(_s["ticker"])
-                    _div_unique.append(_s)
-            _div_opts = [f"{_s['ticker']} — {_s['name']}" for _s in _div_unique]
-
-            with st.form("div_input_form", clear_on_submit=True):
-                _dc1, _dc2, _dc3 = st.columns(3)
-                with _dc1:
-                    _div_sel = st.selectbox("종목", _div_opts)
-                    _div_ticker = _div_sel.split(" — ")[0] if _div_sel else ""
-                    _div_stock = next((_s for _s in _div_unique if _s["ticker"] == _div_ticker), None)
-                    _div_cur = _div_stock["purchase_currency"] if _div_stock else "USD"
-                    _div_sym = {"USD": "$", "JPY": "¥", "KRW": "₩"}.get(_div_cur, "$")
-                    _div_amt = st.number_input(f"1주당 배당금 ({_div_sym})", min_value=0.0, step=0.01)
-                with _dc2:
-                    _div_date = st.date_input("배당 지급일", value=date.today())
-                    _div_qty = st.number_input("배당 적용 수량",
-                        min_value=0.0001,
-                        value=float(_div_stock["quantity"]) if _div_stock else 1.0,
-                        step=1.0)
-                with _dc3:
-                    _div_notes = st.text_input("메모", value="")
-                    _div_rate_ovr = st.number_input(
-                        "환율 (0=자동)", min_value=0.0, value=0.0, step=0.1)
-
-                if _div_amt > 0 and _div_qty > 0:
-                    _div_total = _div_amt * _div_qty
-                    if _div_cur != "KRW":
-                        _div_fx = _div_rate_ovr if _div_rate_ovr > 0 else get_exchange_rate(_div_cur)
-                    else:
-                        _div_fx = 1.0
-                    _div_total_krw = _div_total * _div_fx
-                    _div_total_jpy = _div_total_krw / jpy_rate if jpy_rate > 0 else _div_total_krw
-                    st.info(f"💰 배당금: {_div_sym}{_div_total:,.2f} (¥{_div_total_jpy:,.0f})")
-
-                if st.form_submit_button("✅ 배당금 등록", type="primary"):
-                    if _div_amt <= 0:
-                        st.error("배당금을 입력하세요.")
-                    else:
-                        _div_total = _div_amt * _div_qty
-                        if _div_cur != "KRW":
-                            _div_fx = _div_rate_ovr if _div_rate_ovr > 0 else get_exchange_rate(_div_cur)
-                        else:
-                            _div_fx = 1.0
-                        _div_total_krw = _div_total * _div_fx
-                        add_dividend(
-                            ticker=_div_ticker,
-                            name=_div_stock["name"] if _div_stock else _div_ticker,
-                            payment_date=str(_div_date),
-                            amount_per_share=_div_amt,
-                            currency=_div_cur,
-                            exchange_rate=_div_fx,
-                            quantity=_div_qty,
-                            total_amount=_div_total,
-                            total_amount_krw=_div_total_krw,
-                            broker=_div_stock.get("broker","") if _div_stock else "",
-                            account_type=_div_stock.get("account_type","일반계좌") if _div_stock else "일반계좌",
-                            notes=_div_notes,
+                        import anthropic as _anth_ov
+                        _cl = _anth_ov.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+                        _r = _cl.messages.create(
+                            model="claude-haiku-4-5-20251001",
+                            max_tokens=600,
+                            messages=[{"role": "user", "content":
+                                f"다음 기업 사업 설명을 한국어로 3~4문장으로 핵심만 요약해줘 (회사명/제품명은 영어 유지):\n\n{info['summary']}"}],
                         )
-                        st.success(f"✅ 배당금 등록 완료! {_div_sym}{_div_total:,.2f}")
-                        st.rerun()
+                        st.info(_r.content[0].text)
+                    except Exception as _e_ov:
+                        st.caption(f"요약 실패: {_e_ov}")
 
-    # ═══ 탭3: 배당 이력 ═══════════════════════════════════════
-    with _div_tab_history:
-        _all_divs = get_dividends()
-        if not _all_divs:
-            st.info("등록된 배당금이 없습니다.")
+    st.markdown("---")
+
+    # ── 최근 뉴스 (자동 번역) ────────────────────────────────
+    st.markdown("#### 📰 최근 뉴스")
+    with st.spinner("뉴스 불러오는 중..."):
+        _rnews = get_stock_news(ticker, max_items=6)
+    if _rnews:
+        _has_api_n = bool(os.getenv("ANTHROPIC_API_KEY", ""))
+        if _has_api_n:
+            with st.spinner("한국어 번역 중..."):
+                try:
+                    _rt = _json.loads(_translate_news_cached(
+                        _json.dumps([{"title": n.get("title", ""), "summary": n.get("summary", "")} for n in _rnews],
+                                    ensure_ascii=False)))
+                    for _i, _n in enumerate(_rnews):
+                        _n["title_ko"] = _rt[_i].get("title_ko", "")
+                        _n["summary_ko"] = _rt[_i].get("summary_ko", "")
+                except Exception:
+                    pass
+        for _n in _rnews:
+            _t = _n.get("title_ko") or _n.get("title", "")
+            _u = _n.get("url", "")
+            st.markdown(f"- [{_t}]({_u})" if _u else f"- {_t}")
+            _s = (_n.get("summary_ko") or _n.get("summary", ""))[:110]
+            if _s:
+                st.caption(f"  💡 {_s}")
+    else:
+        st.caption("뉴스를 불러올 수 없습니다.")
+
+    st.markdown("---")
+
+    # ── AI 종목 전망 분석 ────────────────────────────────────
+    st.markdown("#### 🤖 AI 종목 전망 분석")
+    if st.button("🤖 전망 분석 받기", type="primary", key="research_ai_btn"):
+        _api = os.getenv("ANTHROPIC_API_KEY", "")
+        if not _api:
+            st.warning("⚙️ 설정 메뉴에서 Anthropic API 키를 먼저 입력하세요.")
         else:
-            _div_hist_data = []
-            _div_hist_total_krw = 0
-            for _d in _all_divs:
-                _sym = {"USD": "$", "JPY": "¥", "KRW": "₩"}.get(_d.get("currency","USD"), "$")
-                _tkrw = _d.get("total_amount_krw") or 0
-                _div_hist_total_krw += _tkrw
-                _tjpy = _tkrw / jpy_rate if jpy_rate > 0 else _tkrw
-                _div_hist_data.append({
-                    "지급일": _d["payment_date"],
-                    "종목": f"{_d.get('name','')} ({_d['ticker']})",
-                    "1주당": f"{_sym}{_d['amount_per_share']:,.3f}",
-                    "수량": f"{_d['quantity']:.0f}주",
-                    "합계": f"{_sym}{_d['total_amount']:,.2f}",
-                    "엔화": f"¥{_tjpy:,.0f}",
-                    "메모": _d.get("notes",""),
-                    "_id": _d["id"],
-                })
-            st.dataframe(
-                pd.DataFrame(_div_hist_data).drop(columns=["_id"]),
-                use_container_width=True, hide_index=True,
-            )
-            _div_hist_jpy = _div_hist_total_krw / jpy_rate if jpy_rate > 0 else _div_hist_total_krw
-            st.success(f"💰 누적 배당 수입: **¥{_div_hist_jpy:,.0f}**")
-
-            with st.expander("배당 이력 삭제"):
-                for _dh in _div_hist_data:
-                    if st.checkbox(f"{_dh['지급일']} | {_dh['종목']} | {_dh['합계']}", key=f"del_div_{_dh['_id']}"):
-                        if st.button("삭제", key=f"do_del_div_{_dh['_id']}"):
-                            delete_dividend(_dh["_id"])
-                            st.rerun()
-
+            with st.spinner("AI가 분석 중..."):
+                _news_lines = "\n".join(f"- {n.get('title_ko') or n.get('title','')}" for n in (_rnews or [])[:6])
+                _prompt_r = (
+                    f"당신은 주식 애널리스트입니다. 아래 종목을 분석하세요.\n\n"
+                    f"종목: {info.get('name')} ({ticker})\n"
+                    f"섹터: {info.get('sector','')} / {info.get('industry','')}\n"
+                    f"PER(TTM): {info.get('trailing_pe')}, 선행PER: {info.get('forward_pe')}, "
+                    f"PBR: {info.get('pb')}, 배당수익률: {info.get('div_yield')}\n"
+                    f"현재가: {_price}, 52주 최고/최저: {info.get('high_52w')}/{info.get('low_52w')}\n"
+                    f"애널리스트 목표가 평균: {info.get('target_mean')}\n\n"
+                    f"최근 뉴스:\n{_news_lines or '(없음)'}\n\n"
+                    f"다음을 한국어로 작성하세요:\n"
+                    f"1. **📈 강세 요인** (3가지)\n"
+                    f"2. **📉 약세·리스크 요인** (3가지)\n"
+                    f"3. **🔭 종합 전망** (밸류에이션·모멘텀 관점 2~3문장)\n"
+                    f"단정적 매수/매도 권유는 피하고 근거 중심으로 균형 있게 작성하세요."
+                )
+                try:
+                    import anthropic as _anth_r
+                    _clr = _anth_r.Anthropic(api_key=_api)
+                    _respr = _clr.messages.create(
+                        model="claude-sonnet-4-6",
+                        max_tokens=1500,
+                        messages=[{"role": "user", "content": _prompt_r}],
+                    )
+                    st.session_state[f"research_ai_{ticker}"] = _respr.content[0].text
+                except Exception as _er:
+                    _em = str(_er)
+                    if "credit" in _em.lower() or "billing" in _em.lower():
+                        st.error("💳 Anthropic API 크레딧이 부족합니다.\n\n👉 https://console.anthropic.com/settings/billing")
+                    else:
+                        st.error(f"AI 분석 실패: {_em}")
+    if st.session_state.get(f"research_ai_{ticker}"):
+        st.markdown(st.session_state[f"research_ai_{ticker}"])
+        st.caption("※ AI 생성 분석으로 참고용입니다. 투자 판단의 책임은 본인에게 있습니다.")
 
 # ══════════════════════════════════════════════════════════════
 # 페이지 2: 종목 추가/관리
 # ══════════════════════════════════════════════════════════════
-elif page == "종목 추가/관리":
-    st.title("➕ 종목 추가/관리")
+elif page == "종목 관리":
+    st.title("➕ 종목 관리")
 
     # ── 상수 정의 ─────────────────────────────────────────────
     ACCOUNT_TYPES = [
@@ -3289,6 +2986,31 @@ elif page == "종목 추가/관리":
                         )
                     else:
                         hist_rate, actual_date = 1.0, str(date_input)
+
+                    # 매수일 기준 주가 (소수점 매수 자동 계산용)
+                    _hist_price = 0.0
+                    _hist_price_currency = currency_input
+                    try:
+                        import yfinance as _yf_hp
+                        from datetime import timedelta as _td_hp
+                        _dt_obj = datetime.strptime(str(date_input), "%Y-%m-%d")
+                        _start = (_dt_obj - _td_hp(days=7)).strftime("%Y-%m-%d")
+                        _end = (_dt_obj + _td_hp(days=3)).strftime("%Y-%m-%d")
+                        _tk_obj = _yf_hp.Ticker(t.upper())
+                        _hist = _tk_obj.history(start=_start, end=_end)
+                        if not _hist.empty:
+                            if _hist.index.tzinfo is not None:
+                                _hist.index = _hist.index.tz_localize(None)
+                            _before = _hist[_hist.index.date <= _dt_obj.date()]
+                            _row = _before.iloc[-1] if not _before.empty else _hist.iloc[0]
+                            _hist_price = float(_row["Close"])
+                        try:
+                            _hist_price_currency = (_tk_obj.info.get("currency") or currency_input).upper()
+                        except Exception:
+                            _hist_price_currency = currency_input
+                    except Exception:
+                        pass
+
                 st.session_state.stock_preview = {
                     "ticker": t.upper(),
                     "name": info.get("name", t.upper()),
@@ -3297,6 +3019,8 @@ elif page == "종목 추가/관리":
                     "purchase_date": str(date_input),
                     "historical_rate": hist_rate,
                     "actual_rate_date": actual_date,
+                    "historical_price": _hist_price,
+                    "historical_price_currency": _hist_price_currency,
                 }
 
         # ── STEP 2: 조회 결과 + 계좌 종류 선택 + 추가 ────────────
@@ -3311,21 +3035,44 @@ elif page == "종목 추가/관리":
             else:
                 rate_label = "원화 종목 — 환율 변환 없음"
 
+            _hist_price_disp = preview.get("historical_price", 0.0)
+            _hist_price_cur = preview.get("historical_price_currency", preview["currency"])
+            _hist_sym = {"USD": "$", "JPY": "¥", "KRW": "₩"}.get(_hist_price_cur, "$")
+            _hist_label = f" | 매수일 종가: {_hist_sym}{_hist_price_disp:,.2f}" if _hist_price_disp > 0 else ""
             st.info(
                 f"📌 **{preview['name']}** ({preview['ticker']})　|　"
-                f"현재가: {sym}{preview['current_price']:,.2f}　|　{rate_label}"
+                f"현재가: {sym}{preview['current_price']:,.2f}　|　{rate_label}{_hist_label}"
+            )
+
+            # 입력 방식 선택 (폼 밖에서 즉시 반영)
+            _input_mode = st.radio(
+                "입력 방식",
+                ["수량 직접 입력", "총 금액으로 입력 (수량 자동 계산)"],
+                horizontal=True,
+                key="add_input_mode",
+                help="소수점 매수(積立 등)는 '총 금액'으로 입력하면 매수일 종가 기준 수량이 자동 계산됩니다.",
             )
 
             with st.form("add_stock_form", clear_on_submit=True):
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    purchase_price = st.number_input(
-                        f"매수가 ({preview['currency']}) *",
-                        min_value=0.0, value=0.0, step=0.01,
-                    )
-                    quantity = st.number_input(
-                        "매수 수량 *", min_value=0.0001, value=1.0, step=1.0
-                    )
+                    if _input_mode == "총 금액으로 입력 (수량 자동 계산)":
+                        total_amount = st.number_input(
+                            f"총 매수 금액 ({preview['currency']}) *",
+                            min_value=0.0, value=0.0, step=100.0,
+                            help="이 금액 ÷ 매수일 종가 = 수량 자동 계산",
+                        )
+                        purchase_price = 0.0  # 자동 계산
+                        quantity = 0.0  # 자동 계산
+                    else:
+                        purchase_price = st.number_input(
+                            f"매수가 ({preview['currency']}) *",
+                            min_value=0.0, value=0.0, step=0.01,
+                        )
+                        quantity = st.number_input(
+                            "매수 수량 *", min_value=0.0001, value=1.0, step=1.0
+                        )
+                        total_amount = 0.0
                 with col2:
                     broker = st.selectbox("증권사", BROKER_LIST)
                     account_type = st.selectbox(
@@ -3368,10 +3115,46 @@ elif page == "종목 추가/관리":
                     )
 
                 if st.form_submit_button("✅ 추가하기", type="primary"):
+                    final_rate = override_rate if override_rate > 0 else preview["historical_rate"]
+                    _auto_qty_msg = ""
+
+                    # 총 금액 모드: 매수일 종가로 수량 자동 계산
+                    if _input_mode == "총 금액으로 입력 (수량 자동 계산)":
+                        if total_amount <= 0:
+                            st.error("총 매수 금액을 입력하세요.")
+                            st.stop()
+                        _hp = preview.get("historical_price", 0.0)
+                        _hp_cur = preview.get("historical_price_currency", preview["currency"])
+                        if _hp <= 0:
+                            st.error("매수일 종가를 가져올 수 없습니다. 수량 직접 입력을 사용하세요.")
+                            st.stop()
+
+                        # 종가 통화 ≠ 매수 통화면 환율 변환
+                        _inv_cur = preview["currency"]
+                        if _hp_cur != _inv_cur:
+                            try:
+                                _fx_hp, _ = get_historical_exchange_rate(_hp_cur, preview["purchase_date"])
+                                _price_in_inv = _hp * _fx_hp
+                            except Exception:
+                                _price_in_inv = _hp
+                        else:
+                            _price_in_inv = _hp
+
+                        if _price_in_inv <= 0:
+                            st.error("종가 변환 실패. 수량 직접 입력을 사용하세요.")
+                            st.stop()
+
+                        quantity = round(total_amount / _price_in_inv, 6)
+                        purchase_price = _price_in_inv
+                        _auto_qty_msg = (
+                            f"  | 자동 계산: 총 {preview['currency']}{total_amount:,.0f} ÷ "
+                            f"종가 {preview['currency']}{_price_in_inv:,.2f} = **{quantity:.4f}주**"
+                        )
+                        notes = (notes + " " if notes else "") + f"[자동계산] 총 {preview['currency']}{total_amount:,.0f}"
+
                     if purchase_price <= 0:
                         st.error("매수가를 입력하세요.")
                     else:
-                        final_rate = override_rate if override_rate > 0 else preview["historical_rate"]
                         add_stock(
                             ticker=preview["ticker"],
                             name=custom_name or preview["name"],
@@ -3389,6 +3172,7 @@ elif page == "종목 추가/관리":
                         st.success(
                             f"✅ {custom_name or preview['name']} 추가 완료!  "
                             f"증권사: {broker or '미설정'} | 계좌: {account_type} | 적용 환율: {final_rate:,.2f}원"
+                            + _auto_qty_msg
                         )
                         st.rerun()
 
@@ -4017,7 +3801,7 @@ elif page == "종목 추가/관리":
                         )
                         st.plotly_chart(fig_price, use_container_width=True, key=f"chart_{stock['id']}")
 
-                        with st.expander("📅 특정 날짜 금액 확인"):
+                        with st.expander("📅 특정 날짜 주가 확인"):
                             min_d = df_price.index[0].date()
                             max_d = df_price.index[-1].date()
                             sel_date = st.date_input("날짜 선택", value=max_d,
@@ -4032,15 +3816,9 @@ elif page == "종목 추가/관리":
                             else:
                                 actual_date_str = before.index[-1].strftime("%Y-%m-%d")
                                 price_at = float(before.iloc[-1]["price"])
-                                curr_rate_now = get_exchange_rate(currency)
-                                val_jpy = price_at * curr_rate_now * stock["quantity"] / _jpy_rate_cached()
                                 change_pct = ((price_at - stock["purchase_price"]) / stock["purchase_price"] * 100) if stock["purchase_price"] > 0 else 0
                                 arrow = "▲" if change_pct >= 0 else "▼"
-                                dc1, dc2 = st.columns(2)
-                                with dc1:
-                                    st.metric(f"주가 ({actual_date_str})", f"{sym}{price_at:,.2f}", f"{arrow}{abs(change_pct):.2f}%")
-                                with dc2:
-                                    st.metric("평가액 (¥)", f"¥{val_jpy:,.0f}")
+                                st.metric(f"주가 ({actual_date_str})", f"{sym}{price_at:,.2f}", f"{arrow}{abs(change_pct):.2f}%")
                     else:
                         st.caption("주가 데이터를 불러올 수 없습니다.")
 
@@ -4432,7 +4210,7 @@ elif page == "투자 추천":
 
     _inv_mode = st.radio(
         "분석 모드",
-        ["🔍 키워드·트렌드 → 종목 추천", "📊 개별 종목 전망 분석"],
+        ["🔍 키워드·트렌드 → 종목 추천", "📊 개별 종목 전망 분석", "🆚 여러 종목 비교"],
         horizontal=True, key="inv_mode",
     )
 
@@ -4442,6 +4220,12 @@ elif page == "투자 추천":
             _inv_keyword = st.text_input(
                 "티커 또는 종목명 입력",
                 placeholder="예: NVDA, TSLA, AVGO, 7203.T, 삼성전자 등",
+                value=st.session_state.invest_keyword,
+            )
+        elif _inv_mode == "🆚 여러 종목 비교":
+            _inv_keyword = st.text_input(
+                "비교할 종목 2~4개 입력 (쉼표로 구분)",
+                placeholder="예: NVDA, AMD, AVGO  /  005930.KS, 000660.KS",
                 value=st.session_state.invest_keyword,
             )
         else:
@@ -4523,6 +4307,47 @@ elif page == "투자 추천":
 - 티커는 Yahoo Finance 형식
 - 투자 권유가 아닌 정보 제공 목적임을 명시
 - 숫자와 데이터를 최대한 포함 (구체적으로)
+"""
+        elif _inv_mode == "🆚 여러 종목 비교":
+            # ── 여러 종목 비교 분석 프롬프트 ──────────────────
+            _cmp_list = [t.strip() for t in _inv_keyword.replace("，", ",").split(",") if t.strip()]
+            _cmp_str = ", ".join(_cmp_list)
+            _inv_prompt = f"""당신은 글로벌 주식 투자 애널리스트입니다.
+다음 종목들을 비교 분석해주세요: **{_cmp_str}**
+
+사용자의 현재 보유 종목: {_my_list_str}
+
+아래 형식으로 한국어로 답변해주세요:
+
+## 🆚 종목 비교 분석 ({_cmp_str})
+
+### 📊 핵심 지표 비교표
+아래 항목을 마크다운 표로 정리 (각 종목을 열로):
+| 항목 | {' | '.join(_cmp_list)} |
+- 섹터/산업
+- 시가총액
+- PER / 선행 PER
+- 매출 성장률
+- 영업이익률
+- 배당수익률
+- 최근 3개월 주가 흐름 (**상승**/**하락**)
+
+### 🥇 강점·약점 요약
+각 종목별로 한 줄 강점 + 한 줄 약점.
+
+### 💡 종합 비교 의견
+- 성장성 우위 종목 / 안정성 우위 종목 / 밸류에이션 매력 종목을 각각 지목
+- 투자 스타일별(공격적/방어적) 적합 종목 제안
+- 보유 종목이 비교 대상에 있으면 🟢 표시
+
+### ⚠️ 공통 리스크
+이 종목들이 함께 노출된 섹터/거시 리스크 2~3가지.
+
+규칙:
+- 비교표는 반드시 마크다운 표로 작성
+- 상승/하락/급등/급락 등 방향성 단어는 **굵은 글씨**
+- 티커는 Yahoo Finance 형식
+- 투자 권유가 아닌 정보 제공 목적임을 명시
 """
         else:
             # ── 키워드/트렌드 → 종목 추천 프롬프트 ───────────
@@ -4698,410 +4523,10 @@ elif page == "투자 추천":
 
 
 # ══════════════════════════════════════════════════════════════
-# 페이지: 경제적 자유 계획 계산기
-# ══════════════════════════════════════════════════════════════
-elif page == "경제적 자유 계획":
-    st.title("🏖️ 경제적 자유 계획 계산기")
-    st.caption("본인의 개인 자산만으로 경제적 자유를 달성하기 위한 계획을 세웁니다.")
-
-    _api_key_fi = os.getenv("ANTHROPIC_API_KEY", "")
-    _jpy_r_fi = _jpy_rate_cached()
-
-    # ── 저장된 설정 로드 ──────────────────────────────────────
-    _fi_saved = get_settings_bulk("fi_")
-    if "fi_ai_result" not in st.session_state:
-        st.session_state.fi_ai_result = _fi_saved.get("fi_ai_result_cache", None)
-
-    def _fi_default(key, default, as_type=int):
-        """저장된 값이 있으면 사용, 없으면 기본값"""
-        v = _fi_saved.get(key, "")
-        if v == "":
-            return default
-        try:
-            return as_type(v)
-        except (ValueError, TypeError):
-            return default
-
-    # ── 1. 기본 정보 입력 ─────────────────────────────────────
-    st.subheader("1️⃣ 기본 정보")
-    _fi_c1, _fi_c2, _fi_c3 = st.columns(3)
-    with _fi_c1:
-        _saved_birth = _fi_saved.get("fi_birth", "")
-        _default_birth = date.fromisoformat(_saved_birth) if _saved_birth else date(1993, 1, 1)
-        _fi_birth = st.date_input("생년월일", value=_default_birth,
-                                   min_value=date(1960, 1, 1), max_value=date(2005, 12, 31),
-                                   key="fi_birth")
-        _fi_age = (date.today() - _fi_birth).days // 365
-        st.caption(f"현재 나이: **{_fi_age}세**")
-
-        _fi_target_age = st.number_input("목표 경제적 자유 나이", min_value=_fi_age + 1,
-                                          max_value=80,
-                                          value=_fi_default("fi_target_age", min(45, _fi_age + 15)),
-                                          step=1, key="fi_target_age")
-        _fi_years_left = _fi_target_age - _fi_age
-        st.caption(f"남은 기간: **{_fi_years_left}년**")
-
-    with _fi_c2:
-        _fi_salary_annual = st.number_input("연봉 (세전, ¥)", min_value=0,
-                                             value=_fi_default("fi_salary_annual", 0),
-                                             step=100000, key="fi_salary_annual",
-                                             help="세전 연봉. 입력하면 세금을 추정 계산합니다.")
-        _fi_monthly_net = st.number_input("월 실수령액 (세후, ¥)", min_value=0,
-                                           value=_fi_default("fi_monthly_net", 0),
-                                           step=10000, key="fi_monthly_net",
-                                           help="실제 통장에 들어오는 금액. 연봉과 함께 입력하면 실효세율을 계산합니다.")
-        # 세금 계산
-        if _fi_salary_annual > 0 and _fi_monthly_net > 0:
-            _fi_annual_net = _fi_monthly_net * 12
-            _fi_tax_total = _fi_salary_annual - _fi_annual_net
-            _fi_tax_rate = (_fi_tax_total / _fi_salary_annual * 100) if _fi_salary_annual > 0 else 0
-            st.info(f"💴 연간 세금+사회보험: **¥{_fi_tax_total:,.0f}** (실효세율 **{_fi_tax_rate:.1f}%**)")
-        elif _fi_salary_annual > 0:
-            # 일본 세금 추정 (소득세+주민세+사회보험 약 25-30%)
-            _fi_est_rate = 0.25 if _fi_salary_annual < 5000000 else 0.28 if _fi_salary_annual < 8000000 else 0.32
-            _fi_monthly_net = int(_fi_salary_annual * (1 - _fi_est_rate) / 12)
-            st.caption(f"추정 월 실수령: **¥{_fi_monthly_net:,.0f}** (세율 약 {_fi_est_rate*100:.0f}% 추정)")
-
-    with _fi_c3:
-        _fi_industries = [
-            "IT/소프트웨어", "금융/보험", "컨설팅", "제조업", "의료/제약",
-            "교육", "미디어/광고", "부동산", "유통/소매", "공공/공무원", "기타"
-        ]
-        _saved_industry_idx = _fi_industries.index(_fi_saved.get("fi_industry", "IT/소프트웨어")) \
-            if _fi_saved.get("fi_industry", "") in _fi_industries else 0
-        _fi_industry = st.selectbox("업계/직종", _fi_industries, index=_saved_industry_idx, key="fi_industry")
-        _fi_savings_now = st.number_input("현재 저축 잔액 (주식 외, ¥)",
-                                           min_value=0,
-                                           value=_fi_default("fi_savings_now", 0),
-                                           step=100000, key="fi_savings_now")
-
-    st.markdown("---")
-
-    # ── 2. 월 지출 ────────────────────────────────────────────
-    st.subheader("2️⃣ 월 지출")
-    _fi_e1, _fi_e2, _fi_e3 = st.columns(3)
-    with _fi_e1:
-        _fi_living = st.number_input("생활비 (주거+식비+공과금+교통+반려견 등) ¥",
-                                      min_value=0,
-                                      value=_fi_default("fi_living", 150000),
-                                      step=10000, key="fi_living")
-    with _fi_e2:
-        _fi_extra = st.number_input("기타/꾸밈비 (쇼핑+미용+취미+여행 등) ¥",
-                                     min_value=0,
-                                     value=_fi_default("fi_extra", 50000),
-                                     step=10000, key="fi_extra")
-    with _fi_e3:
-        _fi_total_expense = _fi_living + _fi_extra
-        st.metric("월 총 지출", f"¥{_fi_total_expense:,.0f}")
-        _fi_annual_expense = _fi_total_expense * 12
-        st.caption(f"연간: ¥{_fi_annual_expense:,.0f}")
-
-    # ── 💾 입력 정보 저장 ─────────────────────────────────────
-    if st.button("💾 입력 정보 저장", type="primary", key="fi_save_btn"):
-        save_settings_bulk({
-            "fi_birth": str(_fi_birth),
-            "fi_target_age": str(_fi_target_age),
-            "fi_salary_annual": str(_fi_salary_annual),
-            "fi_monthly_net": str(_fi_monthly_net),
-            "fi_industry": _fi_industry,
-            "fi_savings_now": str(_fi_savings_now),
-            "fi_living": str(_fi_living),
-            "fi_extra": str(_fi_extra),
-        })
-        st.success("✅ 입력 정보가 저장되었습니다. 다음에 접속해도 유지됩니다.")
-
-    st.markdown("---")
-
-    # ── 3. 경제 가정치 ────────────────────────────────────────
-    st.subheader("3️⃣ 경제 가정치")
-    _fi_s1, _fi_s2, _fi_s3, _fi_s4 = st.columns(4)
-    with _fi_s1:
-        _fi_inflation = st.slider("물가 상승률 (%/년)", 0.0, 5.0, 2.5, 0.1, key="fi_inflation")
-    with _fi_s2:
-        _fi_return = st.slider("기대 주식 수익률 (%/년)", 0.0, 15.0, 7.0, 0.5, key="fi_return")
-    with _fi_s3:
-        _fi_savings_rate = st.slider("저축 이자율 (%/년)", 0.0, 3.0, 0.5, 0.1, key="fi_savings_rate")
-    with _fi_s4:
-        _fi_withdrawal = st.slider("안전 인출률 (%)", 2.0, 6.0, 4.0, 0.5, key="fi_withdrawal",
-                                    help="은퇴 후 연간 자산의 몇 %를 인출할지 (4% 룰 기본)")
-
-    st.markdown("---")
-
-    # ── 4. 계산 & AI 분석 ─────────────────────────────────────
-    if _fi_monthly_net > 0 and _fi_total_expense > 0:
-        st.subheader("4️⃣ 경제적 자유 분석 결과")
-
-        # 현재 포트폴리오 가치 (앱 데이터에서 자동)
-        _fi_stocks = get_all_stocks()
-        _fi_portfolio_krw = 0
-        if _fi_stocks:
-            try:
-                _fi_agg = aggregate_stocks_by_ticker(_fi_stocks)
-                _fi_summ = get_portfolio_summary(_fi_agg)
-                _fi_portfolio_krw = _fi_summ.get("total_current_krw", 0)
-            except Exception:
-                pass
-        _fi_portfolio_jpy = _fi_portfolio_krw / _jpy_r_fi if _jpy_r_fi > 0 else _fi_portfolio_krw
-
-        # 확정 수익 (매도 + 배당)
-        _fi_realized_krw = sum((r.get("realized_gain_krw") or 0) for r in get_sold_history(limit=10000))
-        _fi_div_krw = (get_dividend_summary().get("total_krw") or 0)
-        _fi_confirmed_jpy = (_fi_realized_krw + _fi_div_krw) / _jpy_r_fi if _jpy_r_fi > 0 else 0
-
-        # 현재 총 자산
-        _fi_total_assets = _fi_portfolio_jpy + _fi_savings_now + _fi_confirmed_jpy
-
-        # 물가 반영 월 지출 (목표 나이 시점)
-        _fi_future_monthly = _fi_total_expense * ((1 + _fi_inflation / 100) ** _fi_years_left)
-        _fi_future_annual = _fi_future_monthly * 12
-
-        # 경제적 자유 목표액 (4% 룰)
-        _fi_target_amount = _fi_future_annual / (_fi_withdrawal / 100)
-
-        # 진행률
-        _fi_progress = min(100, (_fi_total_assets / _fi_target_amount * 100)) if _fi_target_amount > 0 else 0
-
-        # 상단 카드
-        _fic1, _fic2, _fic3, _fic4 = st.columns(4)
-        with _fic1:
-            st.metric("현재 총 자산", f"¥{_fi_total_assets:,.0f}",
-                       help="주식 포트폴리오 + 저축 + 확정수익")
-        with _fic2:
-            st.metric("목표 자산", f"¥{_fi_target_amount:,.0f}",
-                       help=f"물가 반영 후 연간 지출 ¥{_fi_future_annual:,.0f} ÷ {_fi_withdrawal}%")
-        with _fic3:
-            st.metric("진행률", f"{_fi_progress:.1f}%")
-        with _fic4:
-            _fi_investable = _fi_monthly_net - _fi_total_expense
-            st.metric("월 투자 가능액", f"¥{max(0, _fi_investable):,.0f}")
-
-        # 진행 바
-        st.progress(min(1.0, _fi_progress / 100))
-
-        st.markdown("---")
-
-        # ── 시나리오별 달성 시점 계산 ──────────────────────────
-        st.subheader("📊 시나리오별 달성 시점")
-
-        def _calc_years_to_fi(current, target, monthly_invest, annual_return_pct):
-            """단리+복리로 목표 도달까지 몇 년 걸리는지 계산"""
-            r = annual_return_pct / 100
-            assets = current
-            for yr in range(1, 60):
-                assets = assets * (1 + r) + monthly_invest * 12
-                if assets >= target:
-                    return yr
-            return 60  # 60년 이상
-
-        _fi_monthly_invest = max(0, _fi_investable)
-        _scenarios = [
-            ("🐢 보수적", 5.0),
-            ("⚖️ 중립적", _fi_return),
-            ("🚀 적극적", 10.0),
-        ]
-
-        _scenario_data = []
-        _chart_data = {}
-        for _sc_name, _sc_rate in _scenarios:
-            _yrs = _calc_years_to_fi(_fi_total_assets, _fi_target_amount, _fi_monthly_invest, _sc_rate)
-            _target_year = date.today().year + _yrs
-            _scenario_data.append({
-                "시나리오": _sc_name,
-                "수익률": f"{_sc_rate:.1f}%",
-                "달성 시기": f"{_target_year}년" if _yrs < 60 else "60년+",
-                "남은 기간": f"{_yrs}년" if _yrs < 60 else "60년+",
-                "달성 나이": f"{_fi_age + _yrs}세" if _yrs < 60 else "-",
-            })
-
-            # 차트 데이터
-            _assets_by_year = []
-            _a = _fi_total_assets
-            for yr in range(0, min(_yrs + 5, 40)):
-                _assets_by_year.append({"연도": date.today().year + yr, "자산": _a})
-                _a = _a * (1 + _sc_rate / 100) + _fi_monthly_invest * 12
-            _chart_data[_sc_name] = _assets_by_year
-
-        st.dataframe(pd.DataFrame(_scenario_data), use_container_width=True, hide_index=True)
-
-        # 자산 성장 차트
-        fig_fi = go.Figure()
-        _colors = {"🐢 보수적": "#89b4fa", "⚖️ 중립적": "#a6e3a1", "🚀 적극적": "#f9e2af"}
-        for _sc_name, _data in _chart_data.items():
-            if _data:
-                _df_sc = pd.DataFrame(_data)
-                fig_fi.add_trace(go.Scatter(
-                    x=_df_sc["연도"], y=_df_sc["자산"],
-                    mode="lines", name=_sc_name,
-                    line=dict(color=_colors.get(_sc_name, "#cdd6f4"), width=2),
-                ))
-        fig_fi.add_hline(y=_fi_target_amount, line_dash="dash", line_color="#f38ba8",
-                          annotation_text=f"목표: ¥{_fi_target_amount:,.0f}")
-        fig_fi.update_layout(
-            height=350, margin=dict(t=30, b=30),
-            yaxis_title="자산 (¥)", xaxis_title="연도",
-            legend=dict(orientation="h", y=1.1),
-        )
-        st.plotly_chart(fig_fi, use_container_width=True)
-
-        st.markdown("---")
-
-        # ── AI 종합 분석 (투자 추천 + 동년배 비교) ────────────
-        st.subheader("5️⃣ AI 종합 분석 & 추천")
-        if _api_key_fi:
-            if st.button("🤖 AI 분석 시작", type="primary", key="fi_ai_btn"):
-                _fi_prompt = f"""당신은 일본에 거주하는 외국인 여성을 위한 재무설계사입니다.
-
-아래 정보를 바탕으로 한국어로 분석해주세요:
-
-**개인 정보:**
-- 나이: {_fi_age}세 여성, 기혼 (DINK, 자녀 없음), 반려견 1마리
-- 업계: {_fi_industry}
-- 연봉(세전): ¥{_fi_salary_annual:,.0f} / 월 실수령: ¥{_fi_monthly_net:,.0f}
-- 목표: {_fi_target_age}세에 경제적 자유 ({_fi_years_left}년 후)
-
-**자산 현황:**
-- 주식 포트폴리오: ¥{_fi_portfolio_jpy:,.0f}
-- 저축: ¥{_fi_savings_now:,.0f}
-- 확정 수익 (매도+배당): ¥{_fi_confirmed_jpy:,.0f}
-- 총 자산: ¥{_fi_total_assets:,.0f}
-
-**지출:**
-- 생활비: ¥{_fi_living:,.0f}/월
-- 기타/꾸밈비: ¥{_fi_extra:,.0f}/월
-- 총 지출: ¥{_fi_total_expense:,.0f}/월
-- 월 투자 가능액: ¥{max(0, _fi_investable):,.0f}
-
-**목표:**
-- 경제적 자유 목표액: ¥{_fi_target_amount:,.0f} (물가 {_fi_inflation}%/년 반영, {_fi_withdrawal}% 룰)
-- 진행률: {_fi_progress:.1f}%
-
-아래 형식으로 답변:
-
-## 📊 동년배 비교
-- {_fi_age}세 일본 거주 여성 평균 연봉 (전체 + {_fi_industry} 업계)
-- 당신의 소득 위치 (상위 몇 %)
-- {_fi_industry} 업계 평균 연봉 상승률
-- 동년배 평균 저축률 vs 당신의 저축률
-
-## 💴 일본 세금 분석
-- 현재 연봉 기준 예상 세금 내역 (소득세, 주민세, 사회보험료 각각)
-- 절세 팁 (NISA 활용, iDeCo, 후르사토 납세 등)
-
-## 💡 추천 월 자금 배분
-- 수입 ¥{_fi_monthly_net:,.0f}에서 최적 배분 추천
-- 주식 투자 추천 금액 (NISA 우선)
-- 저축 추천 금액 (비상금 6개월분 기준)
-- 여유자금
-
-## 🎯 경제적 자유 달성 전략
-- 현재 속도로 달성 가능한지 평가
-- 가속 방안 (월 투자 증액 효과, 수익률 개선 등)
-- "월 투자를 ¥X 늘리면 Y년 빨라짐" 구체 시뮬레이션
-
-## 📈 배당 자립도
-- 현재 연간 배당 수입 추정 vs 연간 지출
-- 배당으로 생활비 커버까지 필요한 추가 투자
-
-## ⚠️ 리스크 & 주의사항
-- 환율 리스크 (엔화 기반 생활, 달러 투자)
-- 인플레이션 시나리오
-- 비상금 충분성
-
-규칙: 전체 2000자 이내, 숫자를 최대한 구체적으로, **중요 수치는 굵은 글씨**
-"""
-                with st.spinner("🤖 AI가 분석 중입니다..."):
-                    try:
-                        import anthropic as _anth_fi
-                        _client_fi = _anth_fi.Anthropic(api_key=_api_key_fi)
-                        _msg_fi = _client_fi.messages.create(
-                            model="claude-sonnet-4-6",
-                            max_tokens=3000,
-                            messages=[{"role": "user", "content": _fi_prompt}],
-                        )
-                        st.session_state.fi_ai_result = _msg_fi.content[0].text
-                    except Exception as _e_fi:
-                        st.error(f"AI 분석 오류: {_e_fi}")
-
-            if st.session_state.fi_ai_result:
-                st.markdown(st.session_state.fi_ai_result)
-
-                st.markdown("---")
-                # Google Sheets 저장 버튼
-                if st.button("📊 이 계획을 Google Sheets에 저장", key="fi_save_sheets"):
-                    try:
-                        from modules.gsheets import is_available as gs_avail, _get_client, _ensure_worksheet
-                        _gs_env = _load_env()
-                        _gs_id = _gs_env.get("GOOGLE_SHEETS_ID", "")
-                        _gs_creds = _gs_env.get("GOOGLE_SHEETS_CREDENTIALS", "")
-                        if not _gs_id or not _gs_creds or not gs_avail():
-                            st.warning("Google Sheets 설정이 필요합니다. 설정 페이지에서 먼저 연결하세요.")
-                        else:
-                            gc = _get_client(_gs_creds)
-                            ss = gc.open_by_key(_gs_id)
-                            ws = _ensure_worksheet(ss, "경제적자유계획")
-                            _now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-                            _plan_data = [
-                                ["항목", "값"],
-                                ["생성일시", _now_str],
-                                ["생년월일", str(_fi_birth)],
-                                ["현재 나이", f"{_fi_age}세"],
-                                ["목표 나이", f"{_fi_target_age}세"],
-                                ["업계", _fi_industry],
-                                ["연봉(세전)", f"¥{_fi_salary_annual:,.0f}"],
-                                ["월 실수령", f"¥{_fi_monthly_net:,.0f}"],
-                                ["생활비/월", f"¥{_fi_living:,.0f}"],
-                                ["기타비/월", f"¥{_fi_extra:,.0f}"],
-                                ["총지출/월", f"¥{_fi_total_expense:,.0f}"],
-                                ["현재 저축", f"¥{_fi_savings_now:,.0f}"],
-                                ["주식 포트폴리오", f"¥{_fi_portfolio_jpy:,.0f}"],
-                                ["확정수익(매도+배당)", f"¥{_fi_confirmed_jpy:,.0f}"],
-                                ["현재 총 자산", f"¥{_fi_total_assets:,.0f}"],
-                                ["목표 자산", f"¥{_fi_target_amount:,.0f}"],
-                                ["진행률", f"{_fi_progress:.1f}%"],
-                                ["월 투자 가능액", f"¥{max(0, _fi_investable):,.0f}"],
-                                ["물가상승률", f"{_fi_inflation}%"],
-                                ["기대수익률", f"{_fi_return}%"],
-                                ["안전인출률", f"{_fi_withdrawal}%"],
-                                ["", ""],
-                                ["=== AI 분석 ===", ""],
-                                ["분석 내용", st.session_state.fi_ai_result[:5000]],
-                            ]
-                            ws.clear()
-                            ws.update(_plan_data, value_input_option="USER_ENTERED")
-                            st.success(f"✅ Google Sheets '경제적자유계획' 시트에 저장 완료!")
-                    except Exception as _e_gs:
-                        st.error(f"저장 오류: {_e_gs}")
-
-                # 텔레그램 전송 버튼
-                if st.button("📱 이 계획을 텔레그램으로 전송", key="fi_tg_btn"):
-                    _fi_tg_msg = (
-                        f"🏖️ 경제적 자유 계획 ({datetime.now().strftime('%Y-%m-%d')})\n\n"
-                        f"👤 {_fi_age}세 | {_fi_industry} | 목표 {_fi_target_age}세\n"
-                        f"💰 현재 총 자산: ¥{_fi_total_assets:,.0f}\n"
-                        f"🎯 목표 자산: ¥{_fi_target_amount:,.0f}\n"
-                        f"📊 진행률: {_fi_progress:.1f}%\n\n"
-                        f"{st.session_state.fi_ai_result[:3500]}"
-                    )
-                    _fi_tg_result = send_telegram_message(_fi_tg_msg)
-                    if _fi_tg_result.get("success"):
-                        st.success("✅ 텔레그램으로 전송 완료!")
-                    else:
-                        st.error(f"전송 실패: {_fi_tg_result.get('error')}")
-
-                st.caption("⚠️ 이 분석은 참고용이며, 전문 재무설계사의 조언을 대체하지 않습니다.")
-
-        else:
-            st.warning("AI 분석을 위해 설정에서 Anthropic API 키를 입력하세요.")
-
-    else:
-        st.info("위의 기본 정보(월 실수령액)와 월 지출을 입력하면 분석이 시작됩니다.")
-
-
-# ══════════════════════════════════════════════════════════════
 # 페이지 3: 환율 분석
 # ══════════════════════════════════════════════════════════════
-elif page == "환율 분석":
-    st.title("💱 환율 분석")
+elif page == "환율 인텔리전스":
+    st.title("💱 환율 인텔리전스")
 
     # ── 현재 환율 (항상 최상단 표시) ──────────────────────────
     with st.spinner("현재 환율 로딩 중..."):
@@ -5120,6 +4545,114 @@ elif page == "환율 분석":
     with _h4:
         st.caption(f"🕐 업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         st.caption("차트를 드래그하거나 하단 슬라이더로 기간을 조정하세요.")
+
+    st.markdown("---")
+
+    # ── 🤖 AI 환율 변동 원인 분석 ──────────────────────────────
+    st.subheader("🤖 지금 환율, 왜 이렇게 움직이나")
+    st.caption("최근 환율 변동폭과 경제 뉴스를 바탕으로 AI가 변동의 배경·원인을 해설합니다.")
+
+    def _fx_pct_change(df, days):
+        """DataFrame(rate 컬럼)의 최근 N일 변동률(%)."""
+        try:
+            if df is None or df.empty or "rate" not in df:
+                return None
+            s = df["rate"].dropna()
+            if len(s) < 2:
+                return None
+            latest = float(s.iloc[-1])
+            n = min(days, len(s) - 1)
+            past = float(s.iloc[-1 - n])
+            if past == 0:
+                return None
+            return (latest - past) / past * 100
+        except Exception:
+            return None
+
+    _cause_col1, _cause_col2 = st.columns([1, 2])
+    with _cause_col1:
+        _cause_pair = st.radio(
+            "분석할 환율",
+            ["USD/JPY (달러·엔)", "JPY/KRW (엔·원)", "USD/KRW (달러·원)"],
+            key="fx_cause_pair",
+        )
+    with _cause_col2:
+        if _cause_pair.startswith("USD/JPY"):
+            _cause_df = _fx_usdjpy_history_cached(1)
+            _cause_name = "USD/JPY (달러-엔 환율)"
+        elif _cause_pair.startswith("JPY/KRW"):
+            _cause_df = _fx_long_history_cached("JPY", 1)
+            _cause_name = "JPY/KRW (엔-원 환율)"
+        else:
+            _cause_df = _fx_long_history_cached("USD", 1)
+            _cause_name = "USD/KRW (달러-원 환율)"
+
+        _chg_1w = _fx_pct_change(_cause_df, 5)
+        _chg_1m = _fx_pct_change(_cause_df, 21)
+        _chg_3m = _fx_pct_change(_cause_df, 63)
+        _mc1, _mc2, _mc3 = st.columns(3)
+        for _mc, _lbl, _val in [(_mc1, "최근 1주", _chg_1w), (_mc2, "최근 1개월", _chg_1m), (_mc3, "최근 3개월", _chg_3m)]:
+            with _mc:
+                if _val is None:
+                    st.metric(_lbl, "—")
+                else:
+                    st.metric(_lbl, f"{_val:+.2f}%")
+
+    if st.button("🤖 변동 원인 분석하기", type="primary", key="fx_cause_btn"):
+        _api_key_fx = os.getenv("ANTHROPIC_API_KEY", "")
+        if not _api_key_fx:
+            st.warning("⚙️ 설정 메뉴에서 Anthropic API 키를 먼저 입력하세요.")
+        else:
+            with st.spinner("최근 경제 뉴스 수집 + AI 분석 중..."):
+                try:
+                    _news_items = get_market_news(max_per_source=4)
+                except Exception:
+                    _news_items = []
+                _headlines = []
+                for _ni in (_news_items or [])[:25]:
+                    _t = _ni.get("title") or ""
+                    _src = _ni.get("source") or ""
+                    if _t:
+                        _headlines.append(f"- [{_src}] {_t}")
+                _headlines_txt = "\n".join(_headlines) if _headlines else "(수집된 뉴스 없음)"
+
+                def _fmt(v):
+                    return f"{v:+.2f}%" if v is not None else "데이터 없음"
+
+                _prompt_fx = (
+                    f"당신은 외환시장 애널리스트입니다. 아래는 '{_cause_name}'의 최근 변동폭과 "
+                    f"현재 글로벌·한국·일본 경제 뉴스 헤드라인입니다.\n\n"
+                    f"[{_cause_name} 변동폭]\n"
+                    f"- 최근 1주: {_fmt(_chg_1w)}\n"
+                    f"- 최근 1개월: {_fmt(_chg_1m)}\n"
+                    f"- 최근 3개월: {_fmt(_chg_3m)}\n\n"
+                    f"[최근 경제 뉴스 헤드라인]\n{_headlines_txt}\n\n"
+                    f"위 데이터를 근거로 다음을 한국어로 작성하세요:\n"
+                    f"1. **현재 방향**: 지금 {_cause_name}가 강세/약세 중 어느 쪽이며 그 강도는?\n"
+                    f"2. **핵심 동인 3가지**: 통화정책(연준/BOJ/한은 금리), 경기지표, 지정학·무역 등 "
+                    f"무엇이 이 변동을 이끌고 있는지 — 위 뉴스 헤드라인과 연결해 구체적으로.\n"
+                    f"3. **단기 관전 포인트**: 앞으로 며칠~몇 주간 주목할 이벤트/지표.\n"
+                    f"단정적 매매 권유는 피하고, 근거 중심으로 간결하게 작성하세요."
+                )
+                try:
+                    import anthropic as _anth_fx
+                    _client_fx = _anth_fx.Anthropic(api_key=_api_key_fx)
+                    _resp_fx = _client_fx.messages.create(
+                        model="claude-sonnet-4-6",
+                        max_tokens=1500,
+                        messages=[{"role": "user", "content": _prompt_fx}],
+                    )
+                    st.session_state["fx_cause_result"] = _resp_fx.content[0].text
+                except Exception as _e_fx:
+                    _msg = str(_e_fx)
+                    if "credit" in _msg.lower() or "billing" in _msg.lower():
+                        st.error("💳 Anthropic API 크레딧이 부족합니다.\n\n👉 https://console.anthropic.com/settings/billing")
+                    else:
+                        st.error(f"AI 분석 실패: {_msg}")
+
+    if st.session_state.get("fx_cause_result"):
+        st.markdown(st.session_state["fx_cause_result"])
+        st.caption("※ AI 생성 분석으로 참고용입니다. 투자 판단의 책임은 본인에게 있습니다.")
 
     st.markdown("---")
 
@@ -5562,98 +5095,141 @@ elif page == "환율 분석":
 
     st.markdown("---")
 
-    # ── 환율 영향 시뮬레이터 (JPY 기준) ──────────────────────────
-    st.subheader("🧮 환율 변동 영향 계산기 (엔화 기준)")
-    stocks = get_all_stocks()
-    all_stocks_sim = stocks  # JPY 포함 전 종목
+    # ── 환율 변동 영향 (퍼센트 기준 · 금액 비노출) ────────────────
+    st.subheader("🧮 환율 변동 영향 (보유 통화 기준)")
+    st.caption("환율이 바뀌면 엔화로 볼 때 가치가 몇 % 변하는지 보여줍니다. 주가 변동은 제외하고 환율 효과만 반영하며, 자산 금액은 표시하지 않습니다.")
 
-    if not all_stocks_sim:
-        st.info("보유 종목이 없습니다.")
-    else:
-        st.caption("엔화 기준 평가액에 대한 환율 변동 영향을 계산합니다. JPY 종목은 환율 영향 없음.")
-        _has_usd = any(s["purchase_currency"] == "USD" for s in all_stocks_sim)
-        _has_krw = any(s["purchase_currency"] == "KRW" for s in all_stocks_sim)
-
+    _sim_c1, _sim_c2 = st.columns(2)
+    with _sim_c1:
         sim_usdjpy = st.slider(
             "시뮬레이션 USD/JPY (1달러 = ?엔)",
             100, 200,
-            int(usd_jpy_rate) if usd_jpy_rate > 0 else 148,
-            1,
-            disabled=not _has_usd,
-        ) if _has_usd else usd_jpy_rate
+            int(usd_jpy_rate) if usd_jpy_rate > 0 else 148, 1,
+        )
+    with _sim_c2:
         sim_jpykrw = st.slider(
-            "시뮬레이션 JPY/KRW (1엔 = ?원, KRW 종목 환산용)",
+            "시뮬레이션 JPY/KRW (1엔 = ?원)",
             5.0, 15.0,
-            float(jpy_rate),
-            0.1,
-            disabled=not _has_krw,
-        ) if _has_krw else jpy_rate
+            float(jpy_rate) if jpy_rate > 0 else 9.0, 0.1,
+        )
 
-        from modules.stock_data import get_current_price as _gcp
-        sim_rows = []
-        for s in all_stocks_sim:
-            curr      = s["purchase_currency"]
-            curr_price = _gcp(s["ticker"])
-            if curr_price <= 0:
-                continue
+    # USD 표시 종목: 엔화 환산 가치 ∝ USD/JPY → 변동률 = (sim/now - 1)
+    _usd_impact = ((sim_usdjpy - usd_jpy_rate) / usd_jpy_rate * 100) if usd_jpy_rate > 0 else 0.0
+    # KRW 표시 종목: 엔화 환산 가치 ∝ 1/(JPY/KRW) → 변동률 = (now/sim - 1)
+    _krw_impact = ((jpy_rate / sim_jpykrw - 1) * 100) if sim_jpykrw > 0 else 0.0
 
-            if curr == "JPY":
-                # JPY 종목: 환율 영향 없음, 현재가 그대로 엔화
-                curr_val_jpy  = curr_price * s["quantity"]
-                sim_val_jpy   = curr_val_jpy
-                sim_rate_disp = "-"
-            elif curr == "USD":
-                # USD 종목: USD/JPY 환율 적용
-                curr_val_jpy = curr_price * usd_jpy_rate * s["quantity"]
-                sim_val_jpy  = curr_price * sim_usdjpy * s["quantity"]
-                sim_rate_disp = f"¥{sim_usdjpy:,.0f}/USD"
-            elif curr == "KRW":
-                # KRW 종목: JPY/KRW 로 원화→엔화 환산
-                curr_val_jpy = curr_price * s["quantity"] / jpy_rate if jpy_rate > 0 else 0
-                sim_val_jpy  = curr_price * s["quantity"] / sim_jpykrw if sim_jpykrw > 0 else 0
-                sim_rate_disp = f"₩{sim_jpykrw:,.1f}/JPY"
-            else:
-                continue
-
-            diff_jpy = sim_val_jpy - curr_val_jpy
-            sim_rows.append({
-                "종목": s["name"],
-                "통화": curr,
-                "시뮬 환율": sim_rate_disp,
-                "현재 평가액(¥)": f"¥{curr_val_jpy:,.0f}",
-                "시뮬 평가액(¥)": f"¥{sim_val_jpy:,.0f}",
-                "환율 영향(¥)": f"{'+'if diff_jpy>=0 else ''}¥{diff_jpy:,.0f}",
-            })
-        if sim_rows:
-            st.dataframe(pd.DataFrame(sim_rows), use_container_width=True, hide_index=True)
+    _ic1, _ic2, _ic3 = st.columns(3)
+    _ic1.metric("USD 종목 → 엔화 환산", f"{_usd_impact:+.2f}%",
+                help="달러로 표시되는 종목을 엔화로 볼 때의 환율 효과")
+    _ic2.metric("KRW 종목 → 엔화 환산", f"{_krw_impact:+.2f}%",
+                help="원화로 표시되는 종목을 엔화로 볼 때의 환율 효과")
+    _ic3.metric("JPY 종목 → 엔화 환산", "0.00%", help="엔화 종목은 환율 영향이 없습니다")
+    st.caption("※ 예: USD/JPY가 오르면(엔 약세) 달러 표시 종목의 엔화 환산 가치는 그만큼 올라갑니다.")
 
 
 # ══════════════════════════════════════════════════════════════
 # 페이지 4: 일일 리포트
 # ══════════════════════════════════════════════════════════════
-elif page == "일일 리포트":
-    st.title("📅 일일 리포트")
+elif page == "키워드 뉴스":
+    st.title("📰 키워드 뉴스")
+    st.caption("관심 키워드를 넣으면 관련 최신 이슈 뉴스를 모아 보여드립니다. 해외 뉴스는 자동으로 한국어 번역됩니다.")
 
     stocks = get_all_stocks()
     aggregated = aggregate_stocks_by_ticker(stocks) if stocks else []
     unique_tickers = [a["ticker"] for a in aggregated]
 
-    col1, col2 = st.columns([3, 1])
-    with col2:
-        if st.button("📊 지금 리포트 생성", type="primary"):
-            if aggregated:
-                with st.spinner("데이터 수집 및 AI 분석 중..."):
-                    summary = get_portfolio_summary(aggregated)
-                    report = run_daily_analysis(aggregated, summary["items"])
-                st.success("리포트 생성 완료!")
-                st.rerun()
+    # ── 🔍 키워드로 뉴스 모아보기 ──────────────────────────────
+    # 최근/저장 키워드 칩
+    _saved_news_kw = [k.strip() for k in (get_setting("NEWS_KEYWORDS", "") or "").split(",") if k.strip()]
+
+    _kwn_col1, _kwn_col2 = st.columns([4, 1])
+    with _kwn_col1:
+        _kw_input = st.text_input(
+            "🔍 키워드 입력 (예: HBM, 반도체, 금리, AI 데이터센터, 방산)",
+            key="kwnews_input",
+            placeholder="키워드를 입력하고 Enter 또는 '뉴스 모아보기' 클릭",
+        )
+    with _kwn_col2:
+        st.write("")
+        st.write("")
+        _kw_go = st.button("뉴스 모아보기", type="primary", key="kwnews_go")
+
+    # 저장된 키워드 빠른 선택
+    if _saved_news_kw:
+        st.caption("⭐ 저장한 키워드:")
+        _chip_cols = st.columns(min(len(_saved_news_kw), 6))
+        for _ci, _kw in enumerate(_saved_news_kw[:6]):
+            with _chip_cols[_ci % len(_chip_cols)]:
+                if st.button(_kw, key=f"kwchip_{_ci}"):
+                    st.session_state["kwnews_active"] = _kw
+
+    _active_kw = (_kw_input.strip() if (_kw_go and _kw_input.strip()) else st.session_state.get("kwnews_active", ""))
+    if _kw_go and _kw_input.strip():
+        st.session_state["kwnews_active"] = _kw_input.strip()
+        _active_kw = _kw_input.strip()
+
+    if _active_kw:
+        _kc1, _kc2 = st.columns([3, 1])
+        with _kc1:
+            st.subheader(f"📰 '{_active_kw}' 관련 최신 뉴스")
+        with _kc2:
+            if _active_kw not in _saved_news_kw:
+                if st.button("⭐ 키워드 저장", key="kwnews_save"):
+                    _saved_news_kw.append(_active_kw)
+                    save_setting("NEWS_KEYWORDS", ", ".join(_saved_news_kw))
+                    st.rerun()
             else:
-                st.warning("보유 종목을 먼저 추가하세요.")
+                if st.button("✖️ 키워드 삭제", key="kwnews_del"):
+                    _saved_news_kw = [k for k in _saved_news_kw if k != _active_kw]
+                    save_setting("NEWS_KEYWORDS", ", ".join(_saved_news_kw))
+                    st.session_state["kwnews_active"] = ""
+                    st.rerun()
+
+        @st.cache_data(ttl=1200, show_spinner=False)
+        def _keyword_news_cached(kw: str):
+            return get_keyword_news(kw, langs=("ko", "en"), max_items=14)
+
+        with st.spinner("관련 뉴스 수집 중..."):
+            _kw_news = _keyword_news_cached(_active_kw)
+
+        if not _kw_news:
+            st.info("관련 뉴스를 찾지 못했습니다. 다른 키워드로 시도해보세요.")
+        else:
+            # 영문 뉴스 자동 한국어 번역
+            _has_api_kw = bool(os.getenv("ANTHROPIC_API_KEY", ""))
+            _en_news = [n for n in _kw_news if n.get("lang") == "en"]
+            if _en_news and _has_api_kw:
+                with st.spinner("해외 뉴스 한국어 번역 중..."):
+                    _kw_trans_raw = _translate_news_cached(
+                        _json.dumps([{"title": n["title"], "summary": n.get("summary", "")} for n in _en_news],
+                                    ensure_ascii=False)
+                    )
+                try:
+                    _kw_trans = _json.loads(_kw_trans_raw)
+                    for _i, _n in enumerate(_en_news):
+                        _n["title_ko"] = _kw_trans[_i].get("title_ko", "")
+                        _n["summary_ko"] = _kw_trans[_i].get("summary_ko", "")
+                except Exception:
+                    pass
+
+            st.caption(f"총 {len(_kw_news)}건 (Google 뉴스 한국·글로벌 검색)")
+            for _n in _kw_news:
+                _title = _n.get("title_ko") or _n.get("title", "")
+                _summ = (_n.get("summary_ko") or _n.get("summary", ""))[:120]
+                _src = _n.get("source", "")
+                _flag = "🌐" if _n.get("lang") == "en" else "🇰🇷"
+                _url = _n.get("url", "")
+                if _url:
+                    st.markdown(f"{_flag} [{_title}]({_url})  \n<span style='color:#888;font-size:0.85em'>{_src}</span>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"{_flag} {_title}  \n<span style='color:#888;font-size:0.85em'>{_src}</span>", unsafe_allow_html=True)
+                if _summ:
+                    st.caption(f"💡 {_summ}")
 
     st.markdown("---")
 
     # ── 글로벌 + 한국 경제 뉴스 (한국어 번역) ───────────────────
-    st.subheader("🌐 글로벌 & 한국 경제 뉴스")
+    st.subheader("🌐 오늘의 글로벌 & 한국 경제 뉴스")
 
     @st.cache_data(ttl=1800, show_spinner=False)
     def _market_news_cached():
@@ -5710,7 +5286,7 @@ elif page == "일일 리포트":
 
     # ── 뉴스 & 키워드 섹션 ────────────────────────────────────
     if unique_tickers:
-        st.subheader("📰 티커별 주요 뉴스 (최신 3건)")
+        st.subheader("📰 내 종목 관련 뉴스 (최신 3건)")
 
         with st.spinner("뉴스 불러오는 중..."):
             news_by_ticker = {}
@@ -5952,167 +5528,6 @@ elif page == "일일 리포트":
                     st.caption("관련 뉴스를 찾을 수 없습니다.")
 
         st.markdown("---")
-
-    # ── AI 분석 리포트 ────────────────────────────────────────
-    reports = get_reports(limit=30)
-    if not reports:
-        st.info("아직 생성된 리포트가 없습니다. '지금 리포트 생성' 버튼을 눌러보세요.")
-    else:
-        st.subheader("📋 AI 분석 리포트 목록")
-        for r in reports:
-            with st.expander(f"📋 {r['date']} 리포트"):
-                st.markdown(r["report_text"])
-
-
-# ══════════════════════════════════════════════════════════════
-# 페이지: 오프라인에서 보기
-# ══════════════════════════════════════════════════════════════
-elif page == "오프라인에서 보기":
-    st.title("📱 오프라인에서 보기")
-    st.caption(
-        "한 번 바로가기를 만들어두면 집 Wi-Fi 안에서 **핸드폰 홈 화면 아이콘 → 탭 한 번**으로 "
-        "최신 포트폴리오 요약·차트·AI 분석을 볼 수 있습니다. "
-        "완전 오프라인(비행기 모드)은 HTML 파일로 다운로드하세요."
-    )
-
-    if "offline_snapshot_html" not in st.session_state:
-        st.session_state.offline_snapshot_html = None
-
-    _snap_include_ai = st.checkbox(
-        "🤖 AI 분석 포함 (등락 원인 + 향후 전망)",
-        value=False,
-        key="snap_include_ai",
-        help="체크 시 종목마다 Anthropic API 호출 (Haiku+Sonnet). 생성 시간·비용 증가.",
-    )
-
-    _auto_refresh = st.checkbox(
-        "⏱️ 이 페이지 열 때마다 자동 갱신 (15분 TTL 캐시)",
-        value=False, key="snap_auto_refresh",
-        help="페이지 방문 시 스냅샷을 자동으로 새로 만들어 바로가기를 최신으로 유지합니다.",
-    )
-
-    def _save_snapshot_to_static(include_ai_flag: bool, progress_cb=None) -> int:
-        _html = generate_offline_html_snapshot(
-            include_ai=include_ai_flag, progress_cb=progress_cb,
-        )
-        if not _html:
-            return 0
-        _static_path = Path(__file__).parent / "static" / "mobile.html"
-        _static_path.parent.mkdir(parents=True, exist_ok=True)
-        _static_path.write_text(_html, encoding="utf-8")
-        st.session_state.offline_snapshot_html = _html
-        return len(_html)
-
-    @st.cache_data(ttl=900, show_spinner=False)
-    def _auto_refresh_tick(include_ai_flag: bool) -> int:
-        return _save_snapshot_to_static(include_ai_flag)
-
-    if _auto_refresh:
-        with st.spinner("자동 갱신 중..."):
-            _auto_refresh_tick(_snap_include_ai)
-
-    def _get_lan_ip() -> str:
-        import socket
-        try:
-            _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            _s.connect(("8.8.8.8", 80))
-            _ip = _s.getsockname()[0]
-            _s.close()
-            return _ip
-        except Exception:
-            return "localhost"
-
-    def _build_mobile_url() -> str:
-        _port = os.environ.get("STREAMLIT_SERVER_PORT", "8501")
-        return f"http://{_get_lan_ip()}:{_port}/app/static/mobile.html"
-
-    def _qr_png_bytes(text: str) -> bytes:
-        import qrcode
-        import io
-        _q = qrcode.QRCode(box_size=8, border=2)
-        _q.add_data(text)
-        _q.make(fit=True)
-        _img = _q.make_image(fill_color="black", back_color="white")
-        _buf = io.BytesIO()
-        _img.save(_buf, format="PNG")
-        return _buf.getvalue()
-
-    _col_sg, _col_sd = st.columns([1, 1])
-    with _col_sg:
-        if st.button("🔗 모바일 바로가기 만들기 / 업데이트",
-                     type="primary", use_container_width=True):
-            _progress_bar = st.progress(0.0, text="스냅샷 준비 중...")
-
-            def _pcb(i, total, name):
-                _progress_bar.progress(
-                    min(i / max(total, 1), 1.0),
-                    text=f"AI 분석 {i}/{total}: {name}",
-                )
-
-            with st.spinner("스냅샷 생성 중 (주가·차트 로딩)..."):
-                _size = _save_snapshot_to_static(
-                    _snap_include_ai,
-                    _pcb if _snap_include_ai else None,
-                )
-            _progress_bar.empty()
-            if _size > 0:
-                st.success(f"✅ 모바일 바로가기 준비 완료! ({_size//1024:,}KB)")
-            else:
-                st.warning("⚠️ 포트폴리오가 비어 있습니다. 먼저 종목을 추가하세요.")
-
-    with _col_sd:
-        if st.session_state.offline_snapshot_html:
-            st.download_button(
-                "⬇️ 오프라인용 HTML 다운로드",
-                data=st.session_state.offline_snapshot_html,
-                file_name=f"portfolio_snapshot_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
-                mime="text/html",
-                use_container_width=True,
-                help="비행기 모드 등 완전 오프라인에서 볼 때 사용 (핸드폰에 전송 필요)",
-            )
-        else:
-            st.button("⬇️ 오프라인용 HTML 다운로드", disabled=True, use_container_width=True,
-                      help="먼저 왼쪽 버튼으로 스냅샷을 만드세요.")
-
-    _static_file = Path(__file__).parent / "static" / "mobile.html"
-    if _static_file.exists():
-        _mobile_url = _build_mobile_url()
-        st.markdown("#### 📲 핸드폰으로 열기")
-        _qc_l, _qc_r = st.columns([1, 2])
-        with _qc_l:
-            try:
-                st.image(_qr_png_bytes(_mobile_url), caption="QR 코드로 스캔", width=200)
-            except Exception as _e:
-                st.caption(f"QR 생성 실패: {_e}")
-        with _qc_r:
-            st.code(_mobile_url, language=None)
-            _mtime = datetime.fromtimestamp(_static_file.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-            st.caption(f"⏱️ 마지막 갱신: {_mtime} · 크기: {_static_file.stat().st_size//1024:,}KB")
-            st.markdown(
-                "**사용법:**\n"
-                "1. 핸드폰 카메라로 QR 스캔 → Safari/Chrome 열림\n"
-                "2. 📤 공유 → **홈 화면에 추가** (iPhone) / ⋮ → **홈 화면에 추가** (Android)\n"
-                "3. 이후엔 홈 아이콘 **탭 한 번**으로 최신 정보 확인\n"
-                "4. 데이터를 최신화하려면 위 `🔗 만들기/업데이트` 재클릭 또는 자동 갱신 체크"
-            )
-            st.caption(
-                "⚠️ 핸드폰과 PC가 **같은 Wi-Fi**여야 합니다. 외부에서 보려면 오프라인 HTML 다운로드 이용."
-            )
-    else:
-        st.info("아직 바로가기가 생성되지 않았습니다. 위의 `🔗 모바일 바로가기 만들기` 버튼을 누르세요.")
-
-    st.markdown("---")
-    st.markdown(
-        "#### 📖 비행기 모드 (완전 오프라인) 사용법\n"
-        "1. **[비행 전]** `⬇️ 오프라인용 HTML 다운로드` 클릭\n"
-        "2. **[핸드폰 전송]** 다운로드한 파일을 핸드폰으로:\n"
-        "   - iPhone: AirDrop / 이메일 / Google Drive / 카카오톡 '나에게 보내기'\n"
-        "   - Android: Google Drive / 이메일 / Telegram '나에게 보내기' / USB\n"
-        "3. **[핸드폰에서 열기]** 전송된 파일을 탭 → 브라우저가 자동으로 열림\n"
-        "4. **[앱 아이콘처럼]** (선택) 브라우저에서 📤 → `홈 화면에 추가`\n"
-        "5. **[비행기 안]** 홈 아이콘 탭 → 완전 오프라인에서도 전체 포트폴리오·차트 확인\n\n"
-        "⚠️ 생성 당시의 정적 스냅샷 — 가격은 갱신 시점으로 고정됩니다."
-    )
 
 
 # ══════════════════════════════════════════════════════════════

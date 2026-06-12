@@ -280,6 +280,117 @@ def get_market_news(max_per_source: int = 5) -> list[dict]:
     return results
 
 
+# 주식·경제와 무관한 스포츠/연예 뉴스를 걸러내기 위한 차단 키워드
+# (경제 뉴스에서 오탐 가능성이 낮은, 스포츠/연예 특유의 단어 위주로 선별)
+_NON_ECONOMIC_KO = [
+    "월드컵", "축구", "야구", "농구", "배구", "골프", "테니스", "올림픽", "아시안게임",
+    "프로야구", "프로축구", "메이저리그", "챔피언스리그", "월드시리즈", "프리미어리그",
+    "분데스리가", "라리가", "손흥민", "류현진", "이강인", "김민재", "오타니", "페이커",
+    "국가대표", "대표팀", "홈런", "결승전", "준결승", "4강", "8강", "16강", "승부차기",
+    "골든글러브", "와일드카드", "선발 등판", "감독 선임", "이적료",
+    "전반전", "후반전", "개막전", "퇴장", "선제골", "결승골", "추가골", "슈팅",
+    "골키퍼", "페널티킥", "승점", "무승부", "예선 탈락",
+    "KBO", "MLB", "NBA", "NFL", "EPL", "UFC", "LCK", "롤드컵",
+    "드라마", "예능", "아이돌", "걸그룹", "보이그룹", "컴백", "신곡", "뮤직비디오",
+    "콘서트", "팬미팅", "박스오피스", "빌보드", "음원차트", "데뷔 무대",
+]
+_NON_ECONOMIC_EN = [
+    "world cup", "soccer", "olympic", "premier league", "champions league",
+    "world series", "super bowl", "touchdown", "grand slam", "box office",
+    "billboard", "k-pop", " concert", "netflix series", " fifa", " uefa",
+    " nba ", " mlb ", " nfl ", " nhl ", " ncaa ", " golf ", " tennis ",
+]
+
+
+def _is_non_economic_news(title: str, summary: str = "") -> bool:
+    """제목/요약이 스포츠·연예 등 비경제 콘텐츠인지 판별."""
+    text = f"{title or ''} {summary or ''}"
+    # 영문 매칭: 단어 경계용으로 양쪽 공백 패딩
+    text_en = f" {text.lower()} "
+    for term in _NON_ECONOMIC_EN:
+        if term in text_en:
+            return True
+    # 한글 매칭: 부분 문자열
+    for term in _NON_ECONOMIC_KO:
+        if term in text:
+            return True
+    return False
+
+
+def get_keyword_news(keyword: str, langs=("ko", "en"), max_items: int = 12,
+                     exclude_non_economic: bool = True) -> list[dict]:
+    """
+    Google News RSS 검색으로 특정 키워드 관련 최신 뉴스 수집.
+    langs: 조회할 언어 ("ko"=한국어판, "en"=영문/글로벌판). 영문 결과는 호출측에서 번역.
+    exclude_non_economic: True면 스포츠·연예 등 주식/경제와 무관한 뉴스를 제외.
+    반환: [{"source": "...", "title": "...", "summary": "...", "url": "...", "lang": "ko"|"en", "pub": "..."}]
+    """
+    import urllib.parse
+    import re as _re
+    keyword = (keyword or "").strip()
+    if not keyword:
+        return []
+
+    lang_conf = {
+        "ko": {"hl": "ko", "gl": "KR", "ceid": "KR:ko", "label": "Google뉴스 한국"},
+        "en": {"hl": "en-US", "gl": "US", "ceid": "US:en", "label": "Google News (글로벌)"},
+    }
+    headers = {"User-Agent": "Mozilla/5.0"}
+    per_lang = max(1, max_items // max(1, len(langs)))
+    results = []
+    seen_titles = set()
+
+    for lang in langs:
+        conf = lang_conf.get(lang)
+        if not conf:
+            continue
+        q = urllib.parse.quote(keyword)
+        url = (
+            f"https://news.google.com/rss/search?q={q}"
+            f"&hl={conf['hl']}&gl={conf['gl']}&ceid={conf['ceid']}"
+        )
+        try:
+            resp = requests.get(url, headers=headers, timeout=7)
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
+            count = 0
+            for item in root.findall(".//item"):
+                if count >= per_lang:
+                    break
+                raw_title = (item.findtext("title") or "").strip()
+                if not raw_title:
+                    continue
+                # Google News 제목 형식: "기사제목 - 매체명"
+                if " - " in raw_title:
+                    title, publisher = raw_title.rsplit(" - ", 1)
+                else:
+                    title, publisher = raw_title, conf["label"]
+                key = title.strip().lower()
+                if key in seen_titles:
+                    continue
+                summary = (item.findtext("description") or "").strip()
+                summary = _re.sub(r"<[^>]+>", "", summary)[:200].strip()
+                # 스포츠·연예 등 비경제 뉴스 제외
+                if exclude_non_economic and _is_non_economic_news(title, summary):
+                    continue
+                seen_titles.add(key)
+                link = (item.findtext("link") or "").strip()
+                pub = (item.findtext("pubDate") or "").strip()
+                results.append({
+                    "source": publisher.strip(),
+                    "title": title.strip(),
+                    "summary": summary,
+                    "url": link,
+                    "lang": lang,
+                    "pub": pub,
+                })
+                count += 1
+        except Exception:
+            continue
+
+    return results
+
+
 def _get_stock_native_currency(ticker: str) -> str:
     """티커 접미사로 주식/암호화폐의 실제 거래 통화를 추정."""
     if ticker.endswith(".T") or ticker.endswith(".JP"):
