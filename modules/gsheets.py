@@ -63,7 +63,7 @@ def _resolve_oauth_json():
 
 
 def _resolve_service_account_json():
-    """GOOGLE_CREDENTIALS_JSON 값을 st.secrets → os.environ 순서로 조회"""
+    """서비스 계정 JSON 조회: st.secrets → os.environ → 로컬 service_account.json 파일 순서"""
     import os as _os
     try:
         import streamlit as _st
@@ -72,21 +72,48 @@ def _resolve_service_account_json():
             return _val
     except Exception:
         pass
-    return _os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+    _env_val = _os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+    if _env_val:
+        return _env_val
+    # 로컬 편의: 프로젝트 폴더에 service_account.json 파일이 있으면 사용
+    _local_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "service_account.json")
+    if _os.path.exists(_local_path):
+        try:
+            with open(_local_path, "r", encoding="utf-8") as _f:
+                return _f.read()
+        except Exception:
+            pass
+    return ""
 
 
 def _get_client(creds_path: str = ""):
     """
-    인증 방식 자동 선택:
-    1. GOOGLE_OAUTH_TOKEN (Streamlit Secrets 또는 env) → OAuth refresh token 방식
-       - Streamlit Cloud: st.secrets
-       - GitHub Actions CI: os.environ
-    2. GOOGLE_CREDENTIALS_JSON (st.secrets 또는 env) → 서비스 계정 방식
+    인증 방식 자동 선택 (서비스 계정 우선 — 만료 없는 안정 방식):
+    1. GOOGLE_CREDENTIALS_JSON (st.secrets/env/로컬 service_account.json) → 서비스 계정 방식
+    2. GOOGLE_OAUTH_TOKEN (Streamlit Secrets 또는 env) → OAuth refresh token 방식
     3. 로컬 creds 파일 → OAuth2 브라우저 방식 (Mac)
     """
     import json as _json
 
-    # 방식 1: OAuth refresh token (Cloud / CI 공통)
+    # 방식 1: 서비스 계정 (만료 없음 — 최우선). 옛 OAuth 토큰이 남아 있어도 이게 우선됨.
+    _gs_json = _resolve_service_account_json()
+    if _gs_json:
+        try:
+            from google.oauth2.service_account import Credentials as _SACredentials
+            if isinstance(_gs_json, str):
+                _info = _json.loads(_gs_json)
+            else:
+                _info = dict(_gs_json)
+            _scopes = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ]
+            _creds = _SACredentials.from_service_account_info(_info, scopes=_scopes)
+            return gspread.authorize(_creds)
+        except Exception:
+            pass
+
+    # 방식 2: OAuth refresh token (Cloud / CI 공통)
     _oauth_json = _resolve_oauth_json()
     if _oauth_json:
         try:
@@ -106,24 +133,6 @@ def _get_client(creds_path: str = ""):
                     "https://www.googleapis.com/auth/drive",
                 ]),
             )
-            return gspread.authorize(_creds)
-        except Exception:
-            pass
-
-    # 방식 2: 서비스 계정 (Cloud / CI 공통)
-    _gs_json = _resolve_service_account_json()
-    if _gs_json:
-        try:
-            from google.oauth2.service_account import Credentials as _SACredentials
-            if isinstance(_gs_json, str):
-                _info = _json.loads(_gs_json)
-            else:
-                _info = dict(_gs_json)
-            _scopes = [
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive",
-            ]
-            _creds = _SACredentials.from_service_account_info(_info, scopes=_scopes)
             return gspread.authorize(_creds)
         except Exception:
             pass
